@@ -91,6 +91,90 @@ def collect_analytics(video_id: str, topic: str, audience_type: str) -> dict | N
     return record
 
 
+def extract_insights() -> dict:
+    """
+    Phase E — Distil performance_history.json into structured patterns.
+
+    Writes data/insights.json which is read by director_agent._load_insights().
+    Returns the insights dict (empty dict if fewer than 3 data points).
+    """
+    hist_path = Path(HISTORY_FILE)
+    if not hist_path.exists():
+        return {}
+
+    history = json.loads(hist_path.read_text())
+    if len(history) < 3:
+        return {}
+
+    # ── High-CTR patterns ──────────────────────────────────────────────────────
+    # CTR > 5% is generally considered good for YouTube Shorts / Reels style content
+    CTR_THRESHOLD = 0.05          # 5%
+    RETENTION_THRESHOLD = 50.0    # 50% average view percentage
+
+    high_ctr = [
+        h for h in history
+        if h.get("ctr", 0) >= CTR_THRESHOLD and h.get("views", 0) >= 10
+    ]
+    high_retention = [
+        h for h in history
+        if h.get("avg_view_pct", 0) >= RETENTION_THRESHOLD and h.get("views", 0) >= 10
+    ]
+
+    # Sort best first
+    high_ctr.sort(key=lambda h: h.get("ctr", 0), reverse=True)
+    high_retention.sort(key=lambda h: h.get("avg_view_pct", 0), reverse=True)
+
+    # Build text patterns from top performers
+    high_ctr_patterns = [
+        f"{h['topic']} ({h['audience_type']}, CTR {h['ctr']*100:.1f}%)"
+        for h in high_ctr[:5]
+    ]
+    high_retention_topics = [
+        f"{h['topic']} ({h['audience_type']}, {h['avg_view_pct']:.0f}% watched)"
+        for h in high_retention[:5]
+    ]
+
+    # ── Low-performers to avoid ────────────────────────────────────────────────
+    low_performers = [
+        h for h in history
+        if h.get("views", 0) >= 10 and (
+            h.get("avg_view_pct", 100) < 25 or h.get("ctr", 1) < 0.01
+        )
+    ]
+    low_performers.sort(key=lambda h: h.get("avg_view_pct", 100))
+    avoid = [
+        f"{h['topic']} ({h['audience_type']}, {h.get('avg_view_pct',0):.0f}% retention)"
+        for h in low_performers[:3]
+    ]
+
+    # ── Best audience split ────────────────────────────────────────────────────
+    by_type: dict[str, list] = {}
+    for h in history:
+        at = h.get("audience_type", "unknown")
+        by_type.setdefault(at, []).append(h.get("avg_view_pct", 0))
+    best_audience = max(by_type, key=lambda k: sum(by_type[k]) / len(by_type[k])) \
+                    if by_type else None
+
+    insights = {
+        "high_ctr_patterns":      high_ctr_patterns,
+        "high_retention_topics":  high_retention_topics,
+        "avoid":                  avoid,
+        "best_audience_type":     best_audience,
+        "total_videos_analyzed":  len(history),
+        "updated":                str(date.today()),
+    }
+
+    insights_path = Path("data/insights.json")
+    insights_path.parent.mkdir(exist_ok=True)
+    insights_path.write_text(json.dumps(insights, indent=2))
+
+    print(f"  [Analytics] 📊 Insights updated — "
+          f"{len(high_ctr_patterns)} CTR patterns, "
+          f"{len(high_retention_topics)} retention topics, "
+          f"{len(avoid)} topics to avoid")
+    return insights
+
+
 def run_pending_analytics() -> int:
     """
     Check all published videos >= ANALYTICS_DELAY_DAYS old that haven't been collected.

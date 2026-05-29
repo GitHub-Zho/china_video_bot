@@ -1,58 +1,37 @@
-"""Video Agent — MoviePy slideshow + FFmpeg subtitle burn.
+"""Video Agent — assembles video from mixed media (clips + photos) + audio + subtitles.
 
-Pipeline:
-  1. PIL:     letterbox-resize each image to target resolution
-  2. MoviePy: concatenate ImageClips + attach audio → temp MP4 (no subtitles)
-  3. FFmpeg:  burn SRT subtitles onto the temp MP4 → final MP4
+Pipeline per variant (youtube / reels):
+  1. For each MediaItem:
+     - clip  → FFmpeg: trim + scale-crop to target size (no black bars)
+     - photo → FFmpeg: Ken Burns zoom-pan effect → 5s clip
+  2. FFmpeg concat all clips → raw video (no audio)
+  3. FFmpeg: attach audio + burn subtitles → final MP4
 
-This split keeps MoviePy code simple and delegates subtitle rendering
-to FFmpeg, which has reliable libass support on Ubuntu (Oracle Cloud).
-On macOS without libass, a drawtext fallback is used automatically.
+All heavy lifting is in FFmpeg (no MoviePy dependency for this path),
+which means faster processing and no Python memory limits on large frames.
+MoviePy path kept as fallback for legacy image-only calls.
 """
+import random
 import subprocess
 import tempfile
 from pathlib import Path
 
-import numpy as np
-from PIL import Image
-
 from config.settings import (
     YOUTUBE_W, YOUTUBE_H, REELS_W, REELS_H,
-    FPS, SLIDE_DURATION, FADE_DURATION, OUTPUT_DIR
+    FPS, SLIDE_DURATION, FADE_DURATION, OUTPUT_DIR,
 )
 
 
-# ── Image preprocessing ────────────────────────────────────────────────────────
+# ── Subtitle capability ────────────────────────────────────────────────────────
 
-def _letterbox(img_path: str, w: int, h: int) -> np.ndarray:
-    """Resize image to (w, h) with black letterbox bars. Returns np.array."""
-    img = Image.open(img_path).convert("RGB")
-    img.thumbnail((w, h), Image.LANCZOS)
-    bg = Image.new("RGB", (w, h), (0, 0, 0))
-    bg.paste(img, ((w - img.width) // 2, (h - img.height) // 2))
-    return np.array(bg)
-
-
-# ── Subtitle capability check ──────────────────────────────────────────────────
-
-def _ffmpeg_filters() -> set[str]:
-    r = subprocess.run(["ffmpeg", "-filters"], capture_output=True, text=True)
-    out = r.stdout + r.stderr
-    found: set[str] = set()
-    for line in out.splitlines():
-        # lines like " .. drawtext    V->V   ..."
-        parts = line.split()
-        if len(parts) >= 2:
-            found.add(parts[1])
-    return found
-
-
-_SUBTITLE_MODE: str | None = None   # "libass" | "drawtext" | "copy"
+_SUBTITLE_MODE: str | None = None
 
 def _subtitle_mode() -> str:
     global _SUBTITLE_MODE
     if _SUBTITLE_MODE is None:
-        filters = _ffmpeg_filters()
+        r = subprocess.run(["ffmpeg", "-filters"], capture_output=True, text=True)
+        out = r.stdout + r.stderr
+        filters = {line.split()[1] for line in out.splitlines() if len(line.split()) >= 2}
         if "subtitles" in filters:
             _SUBTITLE_MODE = "libass"
         elif "drawtext" in filters:
@@ -60,154 +39,161 @@ def _subtitle_mode() -> str:
         else:
             _SUBTITLE_MODE = "copy"
         labels = {"libass": "libass ✅", "drawtext": "drawtext fallback",
-                  "copy": "⚠️  no subtitle filters — stream copy (no burned subs)"}
+                  "copy": "⚠️  no subtitle filters — stream copy"}
         print(f"  [Video] Subtitle mode: {labels[_SUBTITLE_MODE]}")
     return _SUBTITLE_MODE
 
 
-# ── MoviePy assembly (no subtitles) ───────────────────────────────────────────
+# ── Per-item clip generation ───────────────────────────────────────────────────
 
-def _make_slideshow(image_paths: list[str], audio_path: str,
-                    w: int, h: int, tmp_path: str) -> None:
-    """Assemble images + audio into a temporary MP4 (no subtitles)."""
-    from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
-    from moviepy.video.fx import FadeIn, FadeOut
+_PAN_DIRECTIONS = [
+    # (x_expr, y_expr) for zoompan — 5 different directions
+    ("iw/2-(iw/zoom/2)",  "ih/2-(ih/zoom/2)"),    # center zoom
+    ("0",                 "0"),                     # top-left pan
+    ("iw-(iw/zoom)",      "0"),                     # top-right pan
+    ("0",                 "ih-(ih/zoom)"),           # bottom-left pan
+    ("iw-(iw/zoom)",      "ih-(ih/zoom)"),           # bottom-right pan
+]
 
-    clips = []
-    for img_path in image_paths:
-        frame = _letterbox(img_path, w, h)
-        clip  = (
-            ImageClip(frame)
-            .with_duration(SLIDE_DURATION)
-            .with_fps(FPS)
-            .with_effects([FadeIn(FADE_DURATION), FadeOut(FADE_DURATION)])
-        )
-        clips.append(clip)
 
-    video = concatenate_videoclips(clips, method="compose")
-    audio = AudioFileClip(audio_path)
-
-    # Trim audio/video to the shorter of the two
-    duration = min(video.duration, audio.duration)
-    final    = video.subclipped(0, duration).with_audio(
-        audio.subclipped(0, duration)
+def _make_clip_from_video(src: str, w: int, h: int, duration: float,
+                           out: str) -> bool:
+    """Trim + scale-crop a video clip to (w,h), no black bars."""
+    vf = (
+        f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h},setsar=1"
     )
+    cmd = [
+        "ffmpeg", "-y", "-i", src,
+        "-t", str(duration),
+        "-vf", vf,
+        "-r", str(FPS),
+        "-c:v", "libx264", "-crf", "20", "-preset", "fast",
+        "-an", "-pix_fmt", "yuv420p",
+        out,
+    ]
+    r = subprocess.run(cmd, capture_output=True)
+    return r.returncode == 0
 
-    final.write_videofile(
-        tmp_path,
-        codec="libx264", audio_codec="aac",
-        fps=FPS, preset="fast",
-        logger=None,          # suppress verbose MoviePy output
-    )
-    final.close()
 
+def _make_clip_from_photo(src: str, w: int, h: int, duration: float,
+                           out: str, direction_idx: int = 0) -> bool:
+    """Ken Burns effect: slow zoom-pan on a photo → video clip.
 
-# ── FFmpeg subtitle burn ───────────────────────────────────────────────────────
-
-def _burn_subtitles(tmp_path: str, srt_path: str, out_path: str) -> None:
-    """Add burned-in subtitles to tmp_path → out_path using FFmpeg.
-
-    Falls back gracefully through three modes:
-      libass   — Ubuntu/cloud: full styled subtitles via libass
-      drawtext — partial FFmpeg builds: SRT parsed manually via sendcmd
-      copy     — Mac default FFmpeg (no text filters): stream-copy, no subs
+    Upscales to 8000px first (eliminates zoompan jitter per FFmpeg bug #4298).
     """
+    n_frames = int(duration * FPS)
+    x_expr, y_expr = _PAN_DIRECTIONS[direction_idx % len(_PAN_DIRECTIONS)]
+    # Upscale → zoompan → scale down to target
+    vf = (
+        f"scale=8000:-1,"
+        f"zoompan=z='min(zoom+0.0015,1.4)':"
+        f"x='{x_expr}':y='{y_expr}':"
+        f"d={n_frames}:s={w}x{h}:fps={FPS},"
+        f"setsar=1"
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-framerate", str(FPS), "-i", src,
+        "-t", str(duration),
+        "-vf", vf,
+        "-c:v", "libx264", "-crf", "20", "-preset", "fast",
+        "-an", "-pix_fmt", "yuv420p",
+        out,
+    ]
+    r = subprocess.run(cmd, capture_output=True)
+    return r.returncode == 0
+
+
+# ── Subtitle burn ─────────────────────────────────────────────────────────────
+
+def _burn_subtitles(raw_path: str, audio_path: str,
+                    srt_path: str, out_path: str) -> None:
+    """Attach audio + burn subtitles: raw video → final MP4."""
     mode = _subtitle_mode()
 
     if mode == "copy":
-        # No subtitle filters available — just remux without re-encoding
-        cmd = [
-            "ffmpeg", "-y", "-i", tmp_path,
-            "-c:v", "copy", "-c:a", "copy",
-            "-movflags", "+faststart",
-            out_path
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"FFmpeg remux failed:\n{result.stderr[-800:]}")
-        return
-
-    if mode == "libass":
+        vf_args = []
+    elif mode == "libass":
         safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-        vf = (
+        # Phase F: improved subtitle style — bold, larger, drop shadow, bottom-centre
+        vf_args = [
+            "-vf",
             f"subtitles={safe_srt}:"
-            f"force_style='FontName=Arial,FontSize=28,"
+            f"force_style='FontName=Arial Bold,FontSize=32,Bold=1,"
             f"PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-            f"Outline=2,BorderStyle=1,Shadow=0,Alignment=2,MarginV=45'"
-        )
+            f"BackColour=&H80000000,"
+            f"Outline=2,Shadow=1,BorderStyle=4,"
+            f"Alignment=2,MarginV=60'"
+        ]
     else:
-        # drawtext fallback: parses SRT manually
-        vf = _drawtext_filter(srt_path)
+        vf_args = ["-vf", _drawtext_filter(srt_path)]
 
     cmd = [
-        "ffmpeg", "-y", "-i", tmp_path,
-        "-vf", vf,
-        "-c:v", "libx264", "-crf", "20", "-preset", "fast",
-        "-c:a", "copy",
+        "ffmpeg", "-y",
+        "-i", raw_path,
+        "-i", audio_path,
+        *vf_args,
+        "-c:v", "libx264" if vf_args else "copy",
+        "-crf", "20", "-preset", "fast",
+        "-c:a", "aac",
+        "-shortest",
         "-movflags", "+faststart",
         "-pix_fmt", "yuv420p",
-        out_path
+        out_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"FFmpeg subtitle burn failed:\n{result.stderr[-1500:]}"
-        )
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"FFmpeg final encode failed:\n{r.stderr[-1500:]}")
 
 
 def _drawtext_filter(srt_path: str) -> str:
-    """
-    Build a drawtext+sendcmd filter string by parsing the SRT file.
-    Used as fallback when libass is not available (macOS default ffmpeg).
-    """
-    import re
+    import re, tempfile as tf_mod
     srt    = Path(srt_path).read_text(encoding="utf-8")
     blocks = re.split(r"\n\n+", srt.strip())
-
-    cmd_lines: list[str] = []
+    lines  = []
     for block in blocks:
-        lines = block.strip().splitlines()
-        if len(lines) < 3:
+        bl = block.strip().splitlines()
+        if len(bl) < 3:
             continue
         ts = re.match(
             r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)",
-            lines[1]
+            bl[1]
         )
         if not ts:
             continue
-        h1, m1, s1, ms1, h2, m2, s2, ms2 = map(int, ts.groups())
-        start = h1*3600 + m1*60 + s1 + ms1/1000
-        end   = h2*3600 + m2*60 + s2 + ms2/1000
-        text  = " ".join(lines[2:]).replace("'", "\\'").replace(":", "\\:")
-        cmd_lines.append(f"{start:.3f} drawtext reinit text='{text}';")
-        cmd_lines.append(f"{end:.3f}   drawtext reinit text='';")
-
-    # Write sendcmd to a temp file (will be cleaned by caller's context)
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-    )
-    tmp.write("\n".join(cmd_lines))
-    tmp.close()
-
-    safe_cmd = tmp.name.replace("\\", "/").replace(":", "\\:")
-    return (
-        f"drawtext=fontsize=28:fontcolor=white:borderw=2:bordercolor=black@0.8:"
-        f"x=(w-tw)/2:y=h-70:text='',"
-        f"sendcmd=f={safe_cmd}"
-    )
+        h1,m1,s1,ms1,h2,m2,s2,ms2 = map(int, ts.groups())
+        t0 = h1*3600+m1*60+s1+ms1/1000
+        t1 = h2*3600+m2*60+s2+ms2/1000
+        txt = " ".join(bl[2:]).replace("'", "\\'").replace(":", "\\:")
+        lines += [f"{t0:.3f} drawtext reinit text='{txt}';",
+                  f"{t1:.3f} drawtext reinit text='';"]
+    tmp = tf_mod.NamedTemporaryFile(mode="w", suffix=".txt",
+                                    delete=False, encoding="utf-8")
+    tmp.write("\n".join(lines)); tmp.close()
+    safe = tmp.name.replace("\\", "/").replace(":", "\\:")
+    return (f"drawtext=fontsize=28:fontcolor=white:borderw=2:"
+            f"bordercolor=black@0.8:x=(w-tw)/2:y=h-70:text='',"
+            f"sendcmd=f={safe}")
 
 
-# ── Public API ─────────────────────────────────────────────────────────────────
+# ── Public API ────────────────────────────────────────────────────────────────
 
-def assemble_video(video_id: str, image_paths: list[str],
-                   audio_path: str, srt_path: str) -> dict[str, str]:
+def assemble_video(video_id: str, media_items, audio_path: str,
+                   srt_path: str) -> dict[str, str]:
     """
-    Build YouTube (16:9) and Instagram Reels (9:16) MP4s.
-    Resume-safe: skips variants that already exist.
+    Build YouTube (16:9) and Reels (9:16) MP4s from mixed media.
+
+    media_items: list of MediaItem(path, kind) OR list of str (legacy photo-only)
     Returns {"youtube": path, "reels": path}
     """
-    if len(image_paths) < 2:
-        raise ValueError(f"Need ≥2 images, got {len(image_paths)}")
+    # Normalise legacy str list → MediaItem list
+    from agents.media_agent import MediaItem
+    if media_items and isinstance(media_items[0], str):
+        media_items = [MediaItem(p, "photo") for p in media_items]
+
+    if len(media_items) < 2:
+        raise ValueError(f"Need ≥2 media items, got {len(media_items)}")
 
     out_dir = Path(OUTPUT_DIR) / video_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -221,18 +207,74 @@ def assemble_video(video_id: str, image_paths: list[str],
             outputs[variant] = out_path
             continue
 
-        print(f"  [Video] Building {variant} ({w}×{h}, {len(image_paths)} images)…")
+        n = len(media_items)
+        print(f"  [Video] Building {variant} ({w}×{h}, {n} items)…")
 
-        # Step 1 — MoviePy: images + audio → temp video
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tf:
-            tmp_path = tf.name
+        tmp_dir = Path(tempfile.mkdtemp())
+        segment_paths = []
+
         try:
-            _make_slideshow(image_paths, audio_path, w, h, tmp_path)
+            # ── Step 1: render each item to a normalised segment ──────
+            for i, item in enumerate(media_items):
+                seg = str(tmp_dir / f"seg_{i:03d}.mp4")
+                ok  = False
 
-            # Step 2 — FFmpeg: burn subtitles
-            _burn_subtitles(tmp_path, srt_path, out_path)
+                if item.kind == "clip":
+                    ok = _make_clip_from_video(item.path, w, h,
+                                               SLIDE_DURATION, seg)
+                    if not ok:
+                        print(f"    clip {i} render failed, falling back to photo mode")
+
+                if not ok:  # photo or failed clip
+                    direction = random.randint(0, len(_PAN_DIRECTIONS) - 1)
+                    ok = _make_clip_from_photo(item.path, w, h,
+                                               SLIDE_DURATION, seg, direction)
+
+                if ok and Path(seg).stat().st_size > 1000:
+                    segment_paths.append(seg)
+                else:
+                    print(f"    item {i} skipped (render failed)")
+
+            if len(segment_paths) < 2:
+                raise RuntimeError("Too few segments rendered successfully")
+
+            # ── Step 2: get audio duration, loop segments if needed ───
+            probe = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", audio_path],
+                capture_output=True, text=True,
+            )
+            audio_dur = float(probe.stdout.strip())
+            clips_dur = len(segment_paths) * SLIDE_DURATION
+
+            # If clips total shorter than audio, repeat them
+            if clips_dur < audio_dur:
+                repeats = int(audio_dur / clips_dur) + 1
+                segment_paths = (segment_paths * repeats)[:int(audio_dur / SLIDE_DURATION) + 1]
+
+            # ── Step 3: concat segments ───────────────────────────────
+            list_file = tmp_dir / "concat.txt"
+            list_file.write_text(
+                "\n".join(f"file '{Path(s).absolute()}'" for s in segment_paths)
+            )
+            raw_mp4 = str(tmp_dir / "raw.mp4")
+            r = subprocess.run([
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", str(list_file),
+                "-t", str(audio_dur),
+                "-c:v", "copy", raw_mp4,
+            ], capture_output=True)
+            if r.returncode != 0:
+                raise RuntimeError(f"Concat failed:\n{r.stderr[-500:].decode()}")
+
+            # ── Step 4: audio + subtitles → final ────────────────────
+            _burn_subtitles(raw_mp4, audio_path, srt_path, out_path)
+
         finally:
-            Path(tmp_path).unlink(missing_ok=True)
+            # Clean up temp segments
+            for f in tmp_dir.iterdir():
+                f.unlink(missing_ok=True)
+            tmp_dir.rmdir()
 
         print(f"  [Video] ✅ Saved: {out_path}")
         outputs[variant] = out_path

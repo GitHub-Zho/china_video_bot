@@ -22,9 +22,14 @@ TTS_SPEED  = 0.95             # slightly slower = clearer
 YOUTUBE_W, YOUTUBE_H = 1920, 1080
 REELS_W,   REELS_H   = 1080, 1920
 FPS               = 25
-SLIDE_DURATION    = 5.0       # seconds each image is shown
-FADE_DURATION     = 1.0       # seconds crossfade between images
-IMAGES_PER_VIDEO  = 8         # total images to download
+SLIDE_DURATION    = 5.0       # seconds each clip/photo is shown
+FADE_DURATION     = 1.0       # seconds crossfade between clips
+IMAGES_PER_VIDEO  = 12        # max media items per video
+
+# Target durations — Director Agent plans scene count to match these
+# TODO: confirm preferred lengths with user
+TARGET_YOUTUBE_SECONDS = 60   # ~12 scenes × 5s
+TARGET_REELS_SECONDS   = 45   # ~9  scenes × 5s
 
 # === Publishing ===
 PUBLISH_HOUR     = 9          # 9:00 AM daily

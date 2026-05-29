@@ -51,8 +51,8 @@ def main():
 
     flow = InstalledAppFlow.from_client_secrets_file(SECRETS_FILE, SCOPES)
 
-    # run_console() prints the URL and prompts for the code — works headlessly
-    creds = flow.run_console()
+    # run_local_server with open_browser=False: prints the URL, you open it manually
+    creds = flow.run_local_server(port=0, open_browser=False)
 
     # Extract the three values needed for the server .env
     secrets_data = json.loads(secrets_path.read_text())
