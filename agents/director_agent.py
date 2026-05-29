@@ -94,7 +94,7 @@ class CreativeBrief:
         }
 
 
-# ── Performance insights loader ───────────────────────────────────────────────
+# ── Loaders: analytics insights + human-curated guidelines ────────────────────
 
 def _load_insights() -> str:
     """Load structured insights from analytics learning. Empty str if none."""
@@ -114,6 +114,52 @@ def _load_insights() -> str:
             lines.append("Avoid: " + "; ".join(data["avoid"][:3]))
         return "\n".join(lines)
     except Exception:
+        return ""
+
+
+def _load_guidelines() -> str:
+    """
+    Load human-curated creative guidelines from data/director_guidelines.json.
+
+    This file is maintained by Claude based on video quality feedback.
+    The Director injects these rules into every Groq generation prompt,
+    so edits here directly shape what the next video looks like.
+
+    Returns a formatted string ready to embed in the system prompt,
+    or empty string if the file doesn't exist / has no content.
+    """
+    path = Path("data/director_guidelines.json")
+    if not path.exists():
+        return ""
+    try:
+        g = json.loads(path.read_text())
+        if not g:
+            return ""
+        lines = [
+            f"=== CREATIVE GUIDELINES (version {g.get('version', 1)}, "
+            f"updated {g.get('updated', '?')}) ==="
+        ]
+        if g.get("do"):
+            lines.append("RULES — always do these:")
+            lines.extend(f"  ✓ {rule}" for rule in g["do"])
+        if g.get("avoid"):
+            lines.append("RULES — never do these:")
+            lines.extend(f"  ✗ {rule}" for rule in g["avoid"])
+        if g.get("style_notes"):
+            lines.append("STYLE:")
+            lines.extend(f"  → {note}" for note in g["style_notes"])
+        if g.get("example_good_narrations"):
+            lines.append("GOOD narration examples (use as reference):")
+            lines.extend(f'  "{ex}"' for ex in g["example_good_narrations"])
+        if g.get("example_bad_narrations"):
+            lines.append("BAD narration examples (never write like this):")
+            lines.extend(f'  "{ex}"' for ex in g["example_bad_narrations"])
+        result = "\n".join(lines)
+        print(f"  [Director] 📋 Guidelines loaded (v{g.get('version',1)}, "
+              f"{len(g.get('do',[]))} rules, {len(g.get('avoid',[]))} avoids)")
+        return result
+    except Exception as e:
+        print(f"  [Director] ⚠️  Could not load guidelines: {e}")
         return ""
 
 
@@ -188,27 +234,33 @@ def _fallback_brief(audience_type: str | None, target_seconds: float) -> Creativ
             "topic": "Hidden wonders of China",
             "audience_type": "explorer",
             "mood": "cinematic",
-            "hook": "Most tourists never find this part of China.",
-            "cta": "Follow for more hidden China.",
+            "hook": "Most tourists never see this part of China — and that is a shame.",
+            "cta": "Follow for more hidden China adventures.",
             "raw_scenes": [
-                ("Most tourists never find this part of China.",
+                ("Most tourists never see this part of China — and that is a shame.",
                  "aerial China Zhangjiajie sandstone pillars dawn golden mist swirling", "dramatic"),
-                ("Fenghuang Ancient Town — two thousand years old and still alive.",
-                 "China Fenghuang ancient town wooden stilt houses river reflection sunrise", "warm"),
-                ("The rice terraces of Yunnan glow gold at harvest time.",
-                 "China Yuanyang Hani rice terraces golden sunset aerial panoramic", "cinematic"),
-                ("Guilin's Li River looks like a ink painting come to life.",
-                 "China Li River Guilin cormorant fisherman karst peaks morning mist", "serene"),
-                ("In Chengdu giant pandas eat bamboo while locals play mahjong nearby.",
-                 "China Chengdu giant panda close up eating bamboo lush green", "warm"),
-                ("The Danxia Mountains look like they were painted by a dragon.",
-                 "China Zhangye Danxia colourful rainbow mountains aerial wide shot sunset", "dramatic"),
-                ("Shanghai at night is the future, today.",
-                 "China Shanghai Bund skyline night reflections Pudong neon lights", "energetic"),
-                ("And the best part — it costs a fraction of Europe.",
-                 "China local street food market bustling vendors lanterns colourful", "energetic"),
-                ("Follow for more hidden China.",
-                 "China misty mountain temple sunrise peaceful monks walking path", "cinematic"),
+                ("Fenghuang Ancient Town is two thousand years old and still fully lived-in.",
+                 "China Fenghuang ancient town wooden stilt houses river reflection sunrise warm", "warm"),
+                ("The rice terraces of Yunnan glow gold every October — almost no one goes.",
+                 "China Yuanyang Hani rice terraces golden sunset aerial panoramic harvest", "cinematic"),
+                ("Guilin's Li River looks exactly like a Song dynasty ink painting — but real.",
+                 "China Li River Guilin cormorant fisherman karst peaks morning mist boat", "serene"),
+                ("In Chengdu you can watch giant pandas eat bamboo for about five dollars.",
+                 "China Chengdu giant panda research base bamboo close up morning light", "warm"),
+                ("Zhangye Danxia — rainbow mountains that took twenty million years to form.",
+                 "China Zhangye Danxia colourful rainbow mountains aerial wide shot golden hour", "dramatic"),
+                ("Shanghai's Bund at midnight looks like a science fiction film set — for free.",
+                 "China Shanghai Bund skyline night reflections Pudong neon lights river", "energetic"),
+                ("A full meal at a local night market in Chengdu costs under three dollars.",
+                 "China Chengdu night market street food stalls bustling vendors lanterns evening", "energetic"),
+                ("Wuzhen water town has no cars — just canals, stone bridges, and silence.",
+                 "China Wuzhen water town canals stone bridges reflection lanterns dusk serene", "serene"),
+                ("The Huangshan mountains are so dramatic the Chinese say they are a painting.",
+                 "aerial China Huangshan yellow mountain pine trees sea of clouds sunrise fog", "cinematic"),
+                ("Xi'an has an ancient wall you can cycle around on top — all 14 kilometres.",
+                 "China Xian ancient city wall cycling sunset golden light panoramic dusk", "energetic"),
+                ("Follow for more hidden China adventures.",
+                 "China misty mountain temple sunrise peaceful monks walking stone path", "cinematic"),
             ]
         },
         {
@@ -218,27 +270,33 @@ def _fallback_brief(audience_type: str | None, target_seconds: float) -> Creativ
             "topic": "First-time visitor guide to China",
             "audience_type": "newcomer",
             "mood": "energetic",
-            "hook": "China is nothing like you were told.",
-            "cta": "Save this for your China trip.",
+            "hook": "China is nothing like what you were told — here is what to actually expect.",
+            "cta": "Save this before your China trip.",
             "raw_scenes": [
-                ("China is nothing like you were told.",
-                 "China modern city Shanghai high rise buildings blue sky futuristic", "energetic"),
-                ("The high-speed trains hit 350 km/h — faster than most planes.",
-                 "China Fuxing high speed train station interior sleek modern platform", "energetic"),
-                ("Breakfast at a local shop costs less than one dollar.",
-                 "China street food vendor steaming dumplings baozi morning local market", "warm"),
-                ("The cities are cleaner than you imagined.",
-                 "China clean modern street pedestrian area Beijing hutong renovated", "serene"),
-                ("Yes, Google doesn't work — but WeChat maps handles everything.",
-                 "China smartphone navigation WeChat app street map local landmark", "cinematic"),
-                ("The food is regional, layered, and nothing like takeout.",
-                 "China Sichuan hotpot restaurant interior steaming broth spicy colourful", "warm"),
-                ("People are friendlier than every headline suggested.",
-                 "China local family smiling welcoming tea ceremony traditional courtyard", "warm"),
-                ("And landscapes? Impossible, dramatic, everywhere.",
-                 "aerial China Huangshan mountains pine trees sea of clouds sunrise", "cinematic"),
-                ("Save this for your China trip.",
-                 "China travel montage diverse landscapes city food culture fast cut", "energetic"),
+                ("China is nothing like what you were told — here is what to actually expect.",
+                 "China modern city Shanghai high rise buildings blue sky futuristic skyline", "energetic"),
+                ("The high-speed trains hit 350 kilometres per hour — same trip time as flying.",
+                 "China Fuxing high speed train station interior sleek modern platform departure", "energetic"),
+                ("Breakfast at a local street stall costs less than one US dollar.",
+                 "China street food vendor steaming dumplings baozi morning local market alley", "warm"),
+                ("Most cities are cleaner than you imagined — streets swept before sunrise daily.",
+                 "China clean modern street pedestrian area Beijing hutong renovated morning light", "serene"),
+                ("Google does not work, but Baidu Maps and WeChat handle absolutely everything.",
+                 "China smartphone navigation WeChat app street map local landmark city walking", "cinematic"),
+                ("The food is nothing like takeout — every province tastes completely different.",
+                 "China Sichuan hotpot restaurant interior steaming broth spicy colourful evening", "warm"),
+                ("Strangers will offer to help you navigate — often walking you to your destination.",
+                 "China local family smiling welcoming tea ceremony traditional courtyard afternoon", "warm"),
+                ("The landscapes are so dramatic they look like film sets — but they are real.",
+                 "aerial China Huangshan mountains pine trees sea of clouds dramatic sunrise", "cinematic"),
+                ("A one-way bullet train ticket from Beijing to Shanghai costs around fifty dollars.",
+                 "China Beijing South station high speed rail platform boarding morning rush", "energetic"),
+                ("Mobile payment works everywhere — you can go cashless on day one.",
+                 "China WeChat Pay Alipay QR code street vendor payment seamless modern", "energetic"),
+                ("Most tourist areas have English signs and English-speaking staff since 2010.",
+                 "China tourist area English signage international visitors city landmark daytime", "serene"),
+                ("Save this before your China trip.",
+                 "China travel montage diverse landscapes city food culture fast cut vibrant", "energetic"),
             ]
         },
     ]
@@ -273,6 +331,7 @@ def _generate_brief_via_groq(
     target_seconds: float,
     critique_feedback: str = "",
     insights: str = "",
+    guidelines: str = "",
 ) -> CreativeBrief:
     n_scenes     = math.ceil(target_seconds / SLIDE_DURATION)
     secs_per     = round(target_seconds / n_scenes, 1)
@@ -282,6 +341,10 @@ def _generate_brief_via_groq(
         n_scenes=n_scenes,
         secs_per_scene=secs_per,
     )
+    # Guidelines are injected directly into the system prompt so Groq treats
+    # them as hard constraints, not suggestions in the user turn.
+    if guidelines:
+        system = system + "\n\n" + guidelines
 
     user_parts = []
     if audience_type:
@@ -327,17 +390,18 @@ def _generate_brief_via_groq(
     if not raw_scenes:
         raise ValueError("Groq returned no scenes in the brief")
 
-    # Validate word counts — flag if any narration is too short
+    # Validate word counts — last scene is CTA (≥5 words ok), others need ≥8
+    last_idx = len(raw_scenes) - 1
     short_scenes = [
         (i, s.get("narration", ""))
         for i, s in enumerate(raw_scenes)
-        if len(s.get("narration", "").split()) < 8
+        if len(s.get("narration", "").split()) < (5 if i == last_idx else 8)
     ]
     if short_scenes:
         examples = "; ".join(f'Scene {i}: "{n}"' for i, n in short_scenes[:3])
         raise ValueError(
-            f"Narrations too short (<8 words) in scenes: {examples}. "
-            f"Must be 10-15 word sentences."
+            f"Narrations too short in scenes: {examples}. "
+            f"Non-CTA scenes need ≥8 words; last (CTA) scene needs ≥5 words."
         )
 
     scenes = [
@@ -416,8 +480,9 @@ def create_brief(
     if target_seconds is None:
         target_seconds = float(TARGET_YOUTUBE_SECONDS)
 
-    insights = _load_insights()
-    feedback = ""
+    insights   = _load_insights()
+    guidelines = _load_guidelines()   # human-curated rules, updated by Claude
+    feedback   = ""
 
     for attempt in range(MAX_RETRIES + 1):
         label = "Calling Groq" if attempt == 0 else f"Retry {attempt}/{MAX_RETRIES}"
@@ -425,7 +490,7 @@ def create_brief(
               f"scenes={math.ceil(target_seconds / SLIDE_DURATION)})…")
         try:
             brief = _generate_brief_via_groq(
-                audience_type, target_seconds, feedback, insights
+                audience_type, target_seconds, feedback, insights, guidelines
             )
         except Exception as e:
             print(f"  [Director] Groq unavailable ({e}), using template")

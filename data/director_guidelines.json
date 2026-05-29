@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "updated": "2026-05-30",
+  "updated_reason": "Initial guidelines based on first dry-run review",
+
+  "do": [
+    "Include at least one specific numerical fact per video (years old, km/h, metres tall, cost in USD)",
+    "Name specific sub-locations, not just cities — e.g. 'Nanluogu Xiang alley' not just 'Beijing'",
+    "Open scene 0 with a contrast or surprise that a Western viewer would find counter-intuitive",
+    "Use second-person ('you') to make the viewer feel they are already there",
+    "Each narration should answer: why would THIS specific detail surprise a Western viewer?"
+  ],
+
+  "avoid": [
+    "Generic filler phrases: 'explore the unknown', 'vibrant city', 'breathtaking scenery', 'must-visit destination'",
+    "Sentences that could apply to any country — every line must be China-specific",
+    "Starting scenes with 'The' — sounds like a documentary, not a reel",
+    "Stacking adjectives without facts: 'stunning, beautiful, incredible' with no supporting detail",
+    "Ending sentences with 'always', 'every time', 'completely' — unnatural filler words"
+  ],
+
+  "style_notes": [
+    "Narration tone: a well-travelled friend texting you tips, NOT a BBC documentary narrator",
+    "Sentences should feel unfinished enough that viewers want to watch the next scene",
+    "Contrast works best: ancient vs modern, cheap vs expected luxury, hidden vs famous"
+  ],
+
+  "example_good_narrations": [
+    "This 1,200-year-old town costs less than ten dollars a night to stay in.",
+    "The bullet train from Beijing to Shanghai takes four hours — a flight takes the same.",
+    "Locals here eat breakfast standing up in an alley that hasn't changed since the Tang dynasty."
+  ],
+
+  "example_bad_narrations": [
+    "Explore the unknown.",
+    "Visit ancient villages.",
+    "Experience breathtaking local culture every time."
+  ]
+}

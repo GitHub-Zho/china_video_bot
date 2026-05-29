@@ -3,6 +3,7 @@ credentials/client_secrets.json
 credentials/token.json
 output/
 data/
+!data/director_guidelines.json
 logs/
 __pycache__/
 *.pyc
