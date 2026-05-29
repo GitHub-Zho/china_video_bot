@@ -1,0 +1,16 @@
+{
+  "project_dir": "/Users/jo/codes/china_video_bot",
+  "phases": {
+    "phase_1_scaffold":       {"status": "completed",    "completed_at": "2026-05-29T00:00:00"},
+    "phase_2_script_agent":   {"status": "completed",    "completed_at": "2026-05-29T00:00:00"},
+    "phase_3_image_agent":    {"status": "completed",    "completed_at": "2026-05-29T00:00:00"},
+    "phase_4_voice_subtitle": {"status": "completed",    "completed_at": "2026-05-29T12:00:00"},
+    "phase_5_video_agent":    {"status": "completed",    "completed_at": "2026-05-29T12:00:00"},
+    "phase_6_publisher":      {"status": "completed",    "completed_at": "2026-05-29T00:00:00"},
+    "phase_7_analytics":      {"status": "completed",    "completed_at": "2026-05-29T00:00:00"},
+    "phase_8_orchestrator":   {"status": "completed",    "completed_at": "2026-05-29T12:00:00"},
+    "phase_9_verification":   {"status": "completed",    "completed_at": "2026-05-29T22:37:00"}
+  },
+  "blockers": {},
+  "notes": "All phases complete. Full pipeline verified via --dry-run: script (template fallback) → 4 images → 338KB MP3 + 27-cue SRT → youtube.mp4 (1920×1080 h264) + reels.mp4 (1080×1920). Ready for Oracle Cloud deploy. Remaining user tasks: (1) get free Groq key, (2) run setup_youtube_oauth.py, (3) create Oracle Cloud VM + run deploy/setup_server.sh."
+}

@@ -1,0 +1,11 @@
+.env
+credentials/client_secrets.json
+credentials/token.json
+output/
+data/
+logs/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+pipeline.log
