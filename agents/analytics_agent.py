@@ -172,6 +172,14 @@ def extract_insights() -> dict:
           f"{len(high_ctr_patterns)} CTR patterns, "
           f"{len(high_retention_topics)} retention topics, "
           f"{len(avoid)} topics to avoid")
+
+    # Write to learning log (transparent audit trail)
+    try:
+        from agents.learning_log_agent import log_analytics_update
+        log_analytics_update(insights, n_videos=len(history))
+    except Exception as e:
+        print(f"  [Analytics] ⚠️  Learning log write failed: {e}")
+
     return insights
 
 
