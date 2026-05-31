@@ -1,7 +1,18 @@
 import os
+import sys
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# ── FFmpeg binary ──────────────────────────────────────────────────────────────
+# Prefer the ffmpeg that lives alongside Python (conda env), which is compiled
+# with libfreetype / drawtext support.  Falls back to system ffmpeg if not found.
+_conda_bin    = Path(sys.executable).parent
+_conda_ffmpeg = str(_conda_bin / "ffmpeg")
+_conda_ffprobe = str(_conda_bin / "ffprobe")
+FFMPEG_BIN  = os.getenv("FFMPEG_BIN",  _conda_ffmpeg  if Path(_conda_ffmpeg).exists()  else "ffmpeg")
+FFPROBE_BIN = os.getenv("FFPROBE_BIN", _conda_ffprobe if Path(_conda_ffprobe).exists() else "ffprobe")
 
 # === API Keys ===
 ANTHROPIC_API_KEY   = os.getenv("ANTHROPIC_API_KEY")

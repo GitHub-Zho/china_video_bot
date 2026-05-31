@@ -44,3 +44,36 @@ None detected.
 **Status:** ✅ Applied
 
 ---
+
+## [2] 2026-05-31 · GUIDELINE — v1 → v2: User watched first two generated videos. Feedback: (1) conte
+
+**Source:** Human feedback → Claude analysis → director_guidelines.json
+
+**Analysis:**
+Feedback received: User watched first two generated videos. Feedback: (1) content not engaging enough — narrations are factual but not curiosity-driven, no scroll-stopping hook tension; (2) visual queries too generic — just city names, not cinematic shot descriptions; (3) CTA too formulaic ("discover the secrets of this incredible country")
+
+**Action taken:**
+  [Added DO rule] Open scene 0 with a QUESTION or unresolved tension, not a statement
+  [Added DO rule] Each narration must create curiosity for the NEXT scene — end lines slightly open
+  [Added DO rule] Every 3 scenes, introduce a contrast or unexpected twist
+  [Added DO rule] Visual queries must include location + time of day + lighting + one emotional detail
+  [Added DO rule] Visual queries must be cinematic — describe a shot to a film director, not a search engine
+  [Added AVOID rule] Repeating the same location across multiple scenes
+  [Added AVOID rule] Visual queries that are just city names
+  [Added AVOID rule] CTA lines with "discover the secrets" — too generic
+  [Added style note] Think scroll-stopping: scene 0 must make someone pause their thumb in under 3 seconds
+  [Added style note] The CTA should feel like a cliffhanger — hint at something not yet shown
+  [Added good example] What if I told you this 1,200-year-old town costs less than ten dollars a night?
+  [Added good example] This is China's answer to the Amalfi Coast — except almost nobody outside China knows it exists.
+  [Added bad example] Follow for more hidden China adventures and discover the secrets of this incredible country.
+  Guidelines version: v1 → v2
+
+**Expected effect:**
+Director Groq prompt will include updated rules on next run. Critic scores for specificity/reels_fit/word_count should reflect the change.
+
+**Conflicts with existing rules:**
+None detected.
+
+**Status:** ✅ Applied
+
+---

@@ -18,18 +18,18 @@ from pathlib import Path
 
 from config.settings import (
     YOUTUBE_W, YOUTUBE_H, REELS_W, REELS_H,
-    FPS, SLIDE_DURATION, FADE_DURATION, OUTPUT_DIR,
+    FPS, SLIDE_DURATION, FADE_DURATION, OUTPUT_DIR, FFMPEG_BIN, FFPROBE_BIN,
 )
 
 
 # ── Subtitle capability ────────────────────────────────────────────────────────
 
-_SUBTITLE_MODE: str | None = None
+_SUBTITLE_MODE: str | None = None   # cached on first call; reset by restarting Python
 
 def _subtitle_mode() -> str:
     global _SUBTITLE_MODE
     if _SUBTITLE_MODE is None:
-        r = subprocess.run(["ffmpeg", "-filters"], capture_output=True, text=True)
+        r = subprocess.run([FFMPEG_BIN, "-filters"], capture_output=True, text=True)
         out = r.stdout + r.stderr
         filters = {line.split()[1] for line in out.splitlines() if len(line.split()) >= 2}
         if "subtitles" in filters:
@@ -64,7 +64,7 @@ def _make_clip_from_video(src: str, w: int, h: int, duration: float,
         f"crop={w}:{h},setsar=1"
     )
     cmd = [
-        "ffmpeg", "-y", "-i", src,
+        FFMPEG_BIN, "-y", "-i", src,
         "-t", str(duration),
         "-vf", vf,
         "-r", str(FPS),
@@ -93,7 +93,7 @@ def _make_clip_from_photo(src: str, w: int, h: int, duration: float,
         f"setsar=1"
     )
     cmd = [
-        "ffmpeg", "-y",
+        FFMPEG_BIN, "-y",
         "-loop", "1", "-framerate", str(FPS), "-i", src,
         "-t", str(duration),
         "-vf", vf,
@@ -130,7 +130,7 @@ def _burn_subtitles(raw_path: str, audio_path: str,
         vf_args = ["-vf", _drawtext_filter(srt_path)]
 
     cmd = [
-        "ffmpeg", "-y",
+        FFMPEG_BIN, "-y",
         "-i", raw_path,
         "-i", audio_path,
         *vf_args,
@@ -148,10 +148,33 @@ def _burn_subtitles(raw_path: str, audio_path: str,
 
 
 def _drawtext_filter(srt_path: str) -> str:
-    import re, tempfile as tf_mod
+    """
+    Build a drawtext filter chain — one per SRT cue, time-gated with enable='between(t,…)'.
+    Robust against commas, apostrophes, and other special characters in subtitle text.
+    No sendcmd, no temp files — just a long but valid FFmpeg filter string.
+    """
+    import re, platform
+    # ── Font selection ─────────────────────────────────────────────────────────
+    if platform.system() == "Darwin":
+        font_candidates = [
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+        ]
+    else:
+        font_candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        ]
+    font_path = next((f for f in font_candidates if Path(f).exists()), "")
+    # In FFmpeg filter strings, ':' inside a value must be escaped as '\:'
+    font_arg  = f"fontfile={font_path.replace(':', chr(92)+':')}:" if font_path else ""
+
     srt    = Path(srt_path).read_text(encoding="utf-8")
     blocks = re.split(r"\n\n+", srt.strip())
-    lines  = []
+    parts  = []
+
     for block in blocks:
         bl = block.strip().splitlines()
         if len(bl) < 3:
@@ -165,16 +188,29 @@ def _drawtext_filter(srt_path: str) -> str:
         h1,m1,s1,ms1,h2,m2,s2,ms2 = map(int, ts.groups())
         t0 = h1*3600+m1*60+s1+ms1/1000
         t1 = h2*3600+m2*60+s2+ms2/1000
-        txt = " ".join(bl[2:]).replace("'", "\\'").replace(":", "\\:")
-        lines += [f"{t0:.3f} drawtext reinit text='{txt}';",
-                  f"{t1:.3f} drawtext reinit text='';"]
-    tmp = tf_mod.NamedTemporaryFile(mode="w", suffix=".txt",
-                                    delete=False, encoding="utf-8")
-    tmp.write("\n".join(lines)); tmp.close()
-    safe = tmp.name.replace("\\", "/").replace(":", "\\:")
-    return (f"drawtext=fontsize=28:fontcolor=white:borderw=2:"
-            f"bordercolor=black@0.8:x=(w-tw)/2:y=h-70:text='',"
-            f"sendcmd=f={safe}")
+        txt = " ".join(bl[2:])
+
+        # FFmpeg escaping for unquoted option values (subprocess, no shell involved):
+        #   \  →  \\   (escape first — avoids double-escaping)
+        #   '  →  \'   (apostrophe — must NOT be inside single-quoted context)
+        #   :  →  \:   (option separator)
+        #   ,  →  \,   (filter-chain separator)
+        # Wrap the enable expression in single quotes so its commas are safe.
+        txt_esc = (txt
+                   .replace("\\", "\\\\")
+                   .replace("'",  "\\'")
+                   .replace(":",  "\\:")
+                   .replace(",",  "\\,"))
+
+        parts.append(
+            f"drawtext={font_arg}"
+            f"fontsize=32:fontcolor=white:borderw=3:bordercolor=black@0.9:"
+            f"x=(w-tw)/2:y=h*0.88:"
+            f"text={txt_esc}:"
+            f"enable='between(t,{t0:.3f},{t1:.3f})'"
+        )
+
+    return ",".join(parts) if parts else "null"
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -240,7 +276,7 @@ def assemble_video(video_id: str, media_items, audio_path: str,
 
             # ── Step 2: get audio duration, loop segments if needed ───
             probe = subprocess.run(
-                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                [FFPROBE_BIN, "-v", "quiet", "-show_entries", "format=duration",
                  "-of", "csv=p=0", audio_path],
                 capture_output=True, text=True,
             )
@@ -259,7 +295,7 @@ def assemble_video(video_id: str, media_items, audio_path: str,
             )
             raw_mp4 = str(tmp_dir / "raw.mp4")
             r = subprocess.run([
-                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                FFMPEG_BIN, "-y", "-f", "concat", "-safe", "0",
                 "-i", str(list_file),
                 "-t", str(audio_dur),
                 "-c:v", "copy", raw_mp4,

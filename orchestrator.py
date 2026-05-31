@@ -14,7 +14,7 @@ from agents.voice_agent      import generate_voice
 from agents.video_agent      import assemble_video
 from agents.publisher_agent  import upload_video
 from agents.analytics_agent  import run_pending_analytics, extract_insights
-from config.settings         import OUTPUT_DIR
+from config.settings         import OUTPUT_DIR, FFPROBE_BIN
 
 
 def _video_id() -> str:
@@ -24,7 +24,7 @@ def _video_id() -> str:
 def _probe_duration(path: str) -> float:
     """Return duration in seconds via ffprobe."""
     r = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+        [FFPROBE_BIN, "-v", "quiet", "-show_entries", "format=duration",
          "-of", "csv=p=0", path],
         capture_output=True, text=True,
     )
@@ -63,7 +63,7 @@ def _quality_check(video_path: str, audio_path: str) -> bool:
 
         # Quick stream check — ffprobe will error if the file is corrupted
         r = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+            [FFPROBE_BIN, "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=codec_name", "-of", "csv=p=0", video_path],
             capture_output=True, text=True,
         )

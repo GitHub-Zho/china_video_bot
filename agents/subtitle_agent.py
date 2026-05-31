@@ -44,8 +44,9 @@ def naive_srt(script: str, words_per_minute: int = 140) -> list[str]:
 def get_audio_duration(audio_path: str) -> float:
     """Return audio duration in seconds using ffprobe."""
     import subprocess, json
+    from config.settings import FFPROBE_BIN
     result = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json",
+        [FFPROBE_BIN, "-v", "quiet", "-print_format", "json",
          "-show_format", audio_path],
         capture_output=True, text=True
     )

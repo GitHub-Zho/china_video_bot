@@ -1,39 +1,63 @@
 {
-  "version": 1,
+  "version": 2,
   "updated": "2026-05-30",
-  "updated_reason": "Initial guidelines based on first dry-run review",
+  "updated_reason": "User feedback after first two generated videos: content not engaging, visuals poor quality, subtitles missing",
 
   "do": [
     "Include at least one specific numerical fact per video (years old, km/h, metres tall, cost in USD)",
     "Name specific sub-locations, not just cities — e.g. 'Nanluogu Xiang alley' not just 'Beijing'",
-    "Open scene 0 with a contrast or surprise that a Western viewer would find counter-intuitive",
+    "Open scene 0 with a QUESTION or unresolved tension — not a statement. Example: 'What if I told you this village has been here for 1,200 years — and almost nobody visits?'",
     "Use second-person ('you') to make the viewer feel they are already there",
-    "Each narration should answer: why would THIS specific detail surprise a Western viewer?"
+    "Each narration must create curiosity for the NEXT scene — end lines slightly open, not conclusive",
+    "Every 3 scenes, introduce a contrast or unexpected twist (cheap vs expensive, ancient vs modern, crowded vs empty)",
+    "Visual queries must include: location + time of day + lighting condition + ONE emotional detail (e.g. 'mist rising', 'golden light', 'empty streets')",
+    "Visual queries must be cinematic and specific — imagine describing a shot to a film director, not a search engine"
   ],
 
   "avoid": [
-    "Generic filler phrases: 'explore the unknown', 'vibrant city', 'breathtaking scenery', 'must-visit destination'",
+    "Generic filler phrases: 'explore the unknown', 'vibrant city', 'breathtaking scenery', 'must-visit destination', 'incredible country', 'secrets of this country'",
     "Sentences that could apply to any country — every line must be China-specific",
     "Starting scenes with 'The' — sounds like a documentary, not a reel",
     "Stacking adjectives without facts: 'stunning, beautiful, incredible' with no supporting detail",
-    "Ending sentences with 'always', 'every time', 'completely' — unnatural filler words"
+    "Ending sentences with 'always', 'every time', 'completely' — unnatural filler words",
+    "Repeating the same location across multiple scenes — each scene must be a different place",
+    "Visual queries that are just city names — 'China Shanghai skyline' tells a stock footage site nothing useful",
+    "CTA lines that say 'discover the secrets' — too generic, replace with something specific like 'Follow for more places like this'"
   ],
 
   "style_notes": [
     "Narration tone: a well-travelled friend texting you tips, NOT a BBC documentary narrator",
-    "Sentences should feel unfinished enough that viewers want to watch the next scene",
-    "Contrast works best: ancient vs modern, cheap vs expected luxury, hidden vs famous"
+    "Think scroll-stopping: scene 0 must make someone pause their thumb in under 3 seconds",
+    "Contrast works best: ancient vs modern, cheap vs expected luxury, hidden vs famous",
+    "The CTA (last scene) should feel like a cliffhanger — hint at something you haven't shown yet"
+  ],
+
+  "visual_query_rules": [
+    "Always prefix with 'China' then the specific region/city",
+    "Include time of day: dawn, morning, midday, golden hour, dusk, night",
+    "Include weather/light mood: misty, golden light, overcast, clear blue sky, rainy",
+    "Include one human or natural movement detail: flowing water, walking monks, steam rising, lanterns swaying",
+    "Bad: 'China Beijing streets' — Good: 'China Beijing Hutong alley dawn golden light elderly man cycling'"
   ],
 
   "example_good_narrations": [
-    "This 1,200-year-old town costs less than ten dollars a night to stay in.",
-    "The bullet train from Beijing to Shanghai takes four hours — a flight takes the same.",
-    "Locals here eat breakfast standing up in an alley that hasn't changed since the Tang dynasty."
+    "What if I told you this 1,200-year-old town costs less than ten dollars a night?",
+    "The bullet train from Beijing to Shanghai takes four hours — same as flying, but you see the country.",
+    "Locals here eat breakfast standing up in an alley that hasn't changed since the Tang dynasty.",
+    "This is China's answer to the Amalfi Coast — except almost nobody outside China knows it exists."
   ],
 
   "example_bad_narrations": [
     "Explore the unknown.",
     "Visit ancient villages.",
-    "Experience breathtaking local culture every time."
+    "Experience breathtaking local culture every time.",
+    "Follow for more hidden China adventures and discover the secrets of this incredible country."
+  ],
+
+  "example_good_visual_queries": [
+    "China Guilin Li River dawn mist cormorant fisherman bamboo raft golden light",
+    "China Chengdu Jinli Ancient Street night lanterns red glow wet cobblestones",
+    "China Zhangjiajie sandstone pillars sunrise sea of clouds aerial cinematic",
+    "China Xi'an Muslim Quarter morning food stall steam rising narrow alley warm light"
   ]
 }
