@@ -333,6 +333,7 @@ def _generate_brief_via_groq(
     critique_feedback: str = "",
     insights: str = "",
     guidelines: str = "",
+    prompt: str = "",
 ) -> CreativeBrief:
     n_scenes     = math.ceil(target_seconds / SLIDE_DURATION)
     secs_per     = round(target_seconds / n_scenes, 1)
@@ -360,6 +361,10 @@ def _generate_brief_via_groq(
             f"Pick the best audience type (explorer or newcomer) and topic for today. "
             f"Return the complete JSON object as specified."
         )
+    if prompt:
+        user_parts.insert(0,
+            f"CREATIVE DIRECTION FROM USER (highest priority — the video MUST be "
+            f"about this): {prompt}")
     if insights:
         user_parts.append(insights)
     if critique_feedback:
@@ -471,11 +476,14 @@ def _critique_brief(brief: CreativeBrief) -> tuple[int, str]:
 def create_brief(
     audience_type: str | None = None,
     target_seconds: float | None = None,
+    prompt: str = "",
 ) -> CreativeBrief:
     """
     Create a scene-by-scene creative brief. Uses Groq with critic loop.
     Falls back to curated templates if Groq is unavailable.
 
+    prompt: optional free-text creative direction (e.g. "Xi'an Terracotta Warriors").
+            The video will be built around this topic.
     target_seconds defaults to TARGET_YOUTUBE_SECONDS from settings.
     """
     if target_seconds is None:
@@ -491,7 +499,7 @@ def create_brief(
               f"scenes={math.ceil(target_seconds / SLIDE_DURATION)})…")
         try:
             brief = _generate_brief_via_groq(
-                audience_type, target_seconds, feedback, insights, guidelines
+                audience_type, target_seconds, feedback, insights, guidelines, prompt
             )
         except Exception as e:
             print(f"  [Director] Groq unavailable ({e}), using template")

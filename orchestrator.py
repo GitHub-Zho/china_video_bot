@@ -89,10 +89,12 @@ def _quality_check(video_path: str, audio_path: str,
     return ok
 
 
-def run_pipeline(audience_type: str = None, dry_run: bool = False) -> str:
+def run_pipeline(audience_type: str = None, dry_run: bool = False,
+                 prompt: str = "") -> str:
     """
     Full pipeline for one video.
     dry_run=True  → assembles video locally, skips YouTube upload.
+    prompt        → free-text creative direction (e.g. "Xi'an Terracotta Warriors").
     Returns YouTube video_id string (or local mp4 path if dry_run).
     """
     vid = _video_id()
@@ -102,7 +104,7 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False) -> str:
 
     # ── 1. Director: plan the entire video scene-by-scene ────
     print("\n[1/5] Director planning scenes…")
-    brief = create_brief(audience_type)
+    brief = create_brief(audience_type, prompt=prompt)
     print(f"      Topic    : {brief.topic}")
     print(f"      Audience : {brief.audience_type}")
     print(f"      Scenes   : {len(brief.scenes)} × {brief.scenes[0].duration:.0f}s "
