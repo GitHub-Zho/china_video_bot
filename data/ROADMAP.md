@@ -37,28 +37,52 @@
 
 ---
 
-## 1.5 API 决策（重要 — 成本与替代方案）
+## 1.5 API 决策（重要 — 成本、模型选择、生成/验证分离原则）
 
-### LLM / Vision —— 默认全部用 Groq（免费），不用 Anthropic API
-- **Anthropic API ≠ Claude.ai 订阅**。订阅（Pro/Max）只能在网页/App 对话；
-  API 需在 console.anthropic.com 单独注册并**按用量付费**，订阅不包含。
-- **结论：所有 LLM + Vision 功能默认走 Groq（已有 key，免费）。**
-  - 文本（Director/Critic）：`llama-3.3-70b-versatile`
-  - 视觉（内容验证 / QA 抽帧 / 风格分析）：Groq 的多模态模型
-    （Llama 4 Scout `meta-llama/llama-4-scout-17b-16e-instruct`，支持图像，免费）
-- 现有代码里 `media_analyst_agent.py` / `qa_agent.py` 写的是 Claude（`anthropic`），
-  **待改造为 Groq vision**。在此之前，这些功能在没有 ANTHROPIC_API_KEY 时会优雅跳过。
-- 备选免费视觉 API：Google Gemini `gemini-2.0-flash`（免费额度大）。
-- **若将来要更好的视觉质量**，再考虑付费接 Claude（Opus/Sonnet vision）—— 当作升级项。
+### 核心原则：生成者 ≠ 验证者（不同模型互相把关）
+一个模型有固定盲区——生成时看不出的问题，用同一个模型检查时同样看不出。
+因此**生成用一个模型，验证用另一个模型**，才能真正独立挑错。
 
-### 媒体源 API（都免费）
+| 角色 | 任务 | 模型 | 为什么 |
+|------|------|------|--------|
+| **生成** | Director 写脚本 + 视觉 query | **Groq** `llama-3.3-70b-versatile` | 快、免费、文本够好 |
+| **验证** | 内容匹配 / QA 抽帧 / 风格分析 | **Gemini** `gemini-2.0-flash` | 独立于生成模型；免费视觉最强（1500次/天） |
+| 文本评分 | Critic 给脚本打分 | 可选迁到 Gemini | 同模型评自己的文略偏袒，换模型更客观 |
+
+> 注：视觉验证检查的是**外部产物**（下载的素材、渲染的视频），即使同模型也不算
+> "自评"；但换不同模型（Gemini）能消除共享盲区，是更稳的做法。
+
+### 关于"自己验证自己"的澄清（用户提的好问题）
+- 内容验证器查的是 Pexels/Pixabay 下载回来的**素材**对不对，不是查模型自己写的字
+- QA 查的是 FFmpeg 渲染出的**视频**有没有问题，也不是查模型自己
+- 所以验证有意义。但用 Gemini（≠Groq）做验证，独立性更强 → 采用此方案
+
+### 视觉模型质量排名（2026-06 调研）
+1. **Gemini 2.0 Flash** — 免费视觉最强，1500次/天，无需信用卡（aistudio.google.com）← 选它
+2. Qwen2.5-VL — 中文/亚洲场景识别强，但需阿里云 DashScope（可能要国内手机）
+3. Groq Llama 4 Scout — 快但细粒度分析弱
+4. **Claude vision（Opus/Sonnet）— 质量最高，但付费**
+
+### 升级路径（追求更好效果时）
+- 当前：Groq（生成）+ Gemini（验证），全免费
+- **升级项 A**：验证层换 **Anthropic Claude vision**（console.anthropic.com 注册，
+  按量付费）—— 视觉分析质量最高，适合频道变现后投入
+- **升级项 B**：中国场景识别若 Gemini 不够准，验证层换 Qwen2.5-VL
+- 升级只需改验证层的 API 调用，生成层不动 → 模块化，低改动成本
+
+### Anthropic API ≠ Claude.ai 订阅
+订阅（Pro/Max）只能网页/App 对话；API 需单独注册并按量付费，订阅不包含。
+
+### 媒体源 + 模型 API 一览（除 Anthropic 外都免费）
 | 源 | 用途 | Key 状态 |
 |----|------|---------|
 | Pexels | 视频 + 图片 | ✅ 有 |
 | Unsplash | 图片兜底 | ✅ 有 |
 | Pixabay | 视频第二源 | ✅ 有（2026-06 接入） |
-| Groq | LLM + Vision | ✅ 有 |
+| Groq | LLM 文本生成 | ✅ 有 |
+| **Gemini** | **视觉验证/QA** | ⬜ **待获取**（aistudio.google.com 免费） |
 | Kokoro | TTS（本地） | ✅ 无需 key |
+| Anthropic Claude | 视觉升级项 | ⬜ 付费，暂不用 |
 
 ---
 
