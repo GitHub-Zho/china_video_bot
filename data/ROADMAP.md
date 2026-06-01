@@ -80,7 +80,7 @@
 | Unsplash | 图片兜底 | ✅ 有 |
 | Pixabay | 视频第二源 | ✅ 有（2026-06 接入） |
 | Groq | LLM 文本生成 | ✅ 有 |
-| **Gemini** | **视觉验证/QA** | ⬜ **待获取**（aistudio.google.com 免费） |
+| **Gemini** | **视觉验证/QA** | ⚠️ **key 类型不对**——给的是 `AQ.` 开头的 OAuth 临时令牌（配额极低，持续 429）。需要 `AIza` 开头的正式 API key：aistudio.google.com/apikey |
 | Kokoro | TTS（本地） | ✅ 无需 key |
 | Anthropic Claude | 视觉升级项 | ⬜ 付费，暂不用 |
 
@@ -407,8 +407,9 @@ YouTube数据(3天后) → extract_insights → insights.json
 - [x] 用户素材模式（media_analyst）
 - [x] **Phase 1 — SRT 驱动时长** ✅
 - [x] **字幕修复批次** ✅（sync修复/一场景一字幕/每行居中/Anton字体/Director旁白长度）
-- [~] **Phase 2 — 素材质量** 🔄（已做：跨场景去重✅ + Pixabay 第二源✅；
-      待做：Groq Vision 优中选优——按场景描述从候选里选最匹配的）
+- [~] **Phase 2 — 素材质量** 🔄（已做：跨场景去重✅ + Pixabay 第二源✅ +
+      Gemini 视觉选材&QA 代码✅；阻塞：Gemini key 类型不对需换正式 AIza key。
+      优雅降级已验证——无 Gemini 时靠去重仍出好视频）
 - [ ] Phase 3 — 装配拆分 + QA 自动微调
 - [ ] Phase 4 — CLI + 自主运行 + 话题去重
 - [ ] Phase 5 — 风格参考层
