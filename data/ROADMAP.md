@@ -37,6 +37,31 @@
 
 ---
 
+## 1.5 API 决策（重要 — 成本与替代方案）
+
+### LLM / Vision —— 默认全部用 Groq（免费），不用 Anthropic API
+- **Anthropic API ≠ Claude.ai 订阅**。订阅（Pro/Max）只能在网页/App 对话；
+  API 需在 console.anthropic.com 单独注册并**按用量付费**，订阅不包含。
+- **结论：所有 LLM + Vision 功能默认走 Groq（已有 key，免费）。**
+  - 文本（Director/Critic）：`llama-3.3-70b-versatile`
+  - 视觉（内容验证 / QA 抽帧 / 风格分析）：Groq 的多模态模型
+    （Llama 4 Scout `meta-llama/llama-4-scout-17b-16e-instruct`，支持图像，免费）
+- 现有代码里 `media_analyst_agent.py` / `qa_agent.py` 写的是 Claude（`anthropic`），
+  **待改造为 Groq vision**。在此之前，这些功能在没有 ANTHROPIC_API_KEY 时会优雅跳过。
+- 备选免费视觉 API：Google Gemini `gemini-2.0-flash`（免费额度大）。
+- **若将来要更好的视觉质量**，再考虑付费接 Claude（Opus/Sonnet vision）—— 当作升级项。
+
+### 媒体源 API（都免费）
+| 源 | 用途 | Key 状态 |
+|----|------|---------|
+| Pexels | 视频 + 图片 | ✅ 有 |
+| Unsplash | 图片兜底 | ✅ 有 |
+| Pixabay | 视频第二源 | ✅ 有（2026-06 接入） |
+| Groq | LLM + Vision | ✅ 有 |
+| Kokoro | TTS（本地） | ✅ 无需 key |
+
+---
+
 ## 2. 当前状态（已完成，勿重做）
 
 ### 已建成的模块
@@ -342,7 +367,7 @@ YouTube数据(3天后) → extract_insights → insights.json
 
 ## 7. 待用户提供 / 确认
 
-- [ ] `ANTHROPIC_API_KEY` 填入 `.env`（Vision 质检+素材验证+风格分析都需要）
+- [x] ~~`ANTHROPIC_API_KEY`~~ 不用了 → 改用 Groq Vision（免费）。详见 §1.5
 - [ ] YouTube 频道创建（`yuu.chenn.zzz@gmail.com` 当前无频道，上传会失败）
 - [ ] Oracle Cloud VM（信用卡验证卡住中）
 - [ ] 确认视频时长偏好（当前 32s YouTube / 20s Reels）
@@ -357,7 +382,9 @@ YouTube数据(3天后) → extract_insights → insights.json
 - [x] 学习日志 + guidelines 系统
 - [x] 用户素材模式（media_analyst）
 - [x] **Phase 1 — SRT 驱动时长** ✅
-- [ ] **Phase 2 — 素材质量（多源 + 优中选优）** ← 下一步
+- [x] **字幕修复批次** ✅（sync修复/一场景一字幕/每行居中/Anton字体/Director旁白长度）
+- [~] **Phase 2 — 素材质量** 🔄（已做：跨场景去重✅ + Pixabay 第二源✅；
+      待做：Groq Vision 优中选优——按场景描述从候选里选最匹配的）
 - [ ] Phase 3 — 装配拆分 + QA 自动微调
 - [ ] Phase 4 — CLI + 自主运行 + 话题去重
 - [ ] Phase 5 — 风格参考层
