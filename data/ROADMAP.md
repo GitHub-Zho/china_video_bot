@@ -240,7 +240,12 @@ def get_clip_duration(path: str) -> float:
 
 ---
 
-### Phase 3 — 装配拆分 + QA 自动微调 ⬜
+### Phase 3 — 装配拆分 + QA 自动微调 ✅（2026-06-02 完成）
+**实现：** VideoRenderParams（每视频独立）+ 保存 raw 视频 + rerender_subtitles
+只重烧字幕 + adjust_params_from_qa 共识调参（large→缩/small→放/位置/滞留）。
+验证：Gemini 报"字幕太大"(8/8) → font 0.040→0.034 → 两版本重烧 → 画面平衡。
+洞察：同字号在干净背景显大、繁忙背景显小 → 正是每视频自适应的理由。
+
 **目标：** 让 QA 能**只重烧字幕**修复问题，10秒搞定，不重做整片。每视频独立微调。
 
 **改动文件：**
@@ -410,7 +415,7 @@ YouTube数据(3天后) → extract_insights → insights.json
 - [~] **Phase 2 — 素材质量** 🔄（已做：跨场景去重✅ + Pixabay 第二源✅ +
       Gemini 视觉选材&QA 代码✅；阻塞：Gemini key 类型不对需换正式 AIza key。
       优雅降级已验证——无 Gemini 时靠去重仍出好视频）
-- [ ] Phase 3 — 装配拆分 + QA 自动微调
+- [x] **Phase 3 — 装配拆分 + QA 自动微调** ✅
 - [ ] Phase 4 — CLI + 自主运行 + 话题去重
 - [ ] Phase 5 — 风格参考层
 - [ ] Phase 6 — AUTONOMOUS_GUIDE.md
