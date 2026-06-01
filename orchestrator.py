@@ -128,7 +128,8 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False) -> str:
 
     # ── 4. Video assembly ─────────────────────────────────────
     print("\n[4/5] Assembling video…")
-    video_paths = assemble_video(vid, media_items, audio_path, srt_path)
+    video_paths = assemble_video(vid, media_items, audio_path, srt_path,
+                                  hook_text=brief.hook)
 
     # Quality check
     print("\n  [QC] Running post-generation checks…")
@@ -154,5 +155,81 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False) -> str:
         print(f"  [+] Analytics collected for {n} previous video(s)")
         extract_insights()   # refresh data/insights.json for next Director run
 
+    print(f"\n✅ Done!  https://www.youtube.com/watch?v={yt_id}\n")
+    return yt_id
+
+
+def run_pipeline_from_folder(
+    folder_path: str,
+    dry_run: bool = False,
+    target_seconds: float | None = None,
+) -> str:
+    """
+    Alternate pipeline: user provides their own images/clips.
+
+    Instead of Groq + Pexels, this mode:
+      1. Reads all images/clips from folder_path
+      2. Sends them to Claude Vision for scene-by-scene analysis
+      3. Auto-generates narration matched to each photo/clip
+      4. Assembles video with the same Voice + Video + Publish pipeline
+
+    Great for: food photos, personal travel photos, event footage.
+
+    Returns YouTube video_id (or local mp4 path if dry_run).
+    """
+    from agents.media_analyst_agent import analyse_folder
+
+    vid = _video_id()
+    print(f"\n{'='*55}")
+    print(f"  China Video Bot (from folder)  ·  {vid}")
+    print(f"  Folder: {folder_path}")
+    print(f"{'='*55}")
+
+    # ── 1. Analyse user media with Claude Vision ──────────────
+    print("\n[1/5] Analysing your media with Claude Vision…")
+    brief, media_items = analyse_folder(folder_path, target_seconds)
+    print(f"      Topic    : {brief.topic}")
+    print(f"      Audience : {brief.audience_type}")
+    print(f"      Scenes   : {len(brief.scenes)}")
+
+    out_dir = Path(OUTPUT_DIR) / vid
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "metadata.json").write_text(
+        json.dumps(brief.to_metadata_dict(), indent=2)
+    )
+
+    # ── 2. (Media already provided — no download needed) ─────
+    clips  = sum(1 for m in media_items if m.kind == "clip")
+    photos = sum(1 for m in media_items if m.kind == "photo")
+    print(f"\n[2/5] Media ready: {len(media_items)} items ({clips} clips, {photos} photos)")
+
+    # ── 3. Voice + Subtitles ─────────────────────────────────
+    print("\n[3/5] Generating voiceover + subtitles…")
+    audio_path, srt_path = generate_voice(vid, brief.script)
+    audio_dur = _probe_duration(audio_path)
+    print(f"      Audio: {audio_dur:.1f}s  |  Script: {len(brief.script.split())} words")
+
+    # ── 4. Video assembly ─────────────────────────────────────
+    print("\n[4/5] Assembling video…")
+    video_paths = assemble_video(vid, media_items, audio_path, srt_path,
+                                  hook_text=brief.hook)
+
+    # Quality check
+    print("\n  [QC] Running post-generation checks…")
+    yt_path = video_paths.get("youtube", "")
+    qc_pass = _quality_check(yt_path, audio_path) if yt_path else False
+    if not qc_pass:
+        print("  [QC] ⚠️  Quality check flagged issues — review output before uploading")
+
+    if dry_run:
+        print(f"\n✅ DRY RUN — videos saved locally:")
+        for k, v in video_paths.items():
+            print(f"   {k}: {v}")
+        return video_paths.get("youtube", "")
+
+    # ── 5. Publish ────────────────────────────────────────────
+    print("\n[5/5] Uploading to YouTube…")
+    metadata = brief.to_metadata_dict()
+    yt_id = upload_video(video_paths["youtube"], metadata)
     print(f"\n✅ Done!  https://www.youtube.com/watch?v={yt_id}\n")
     return yt_id

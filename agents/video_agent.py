@@ -18,7 +18,8 @@ from pathlib import Path
 
 from config.settings import (
     YOUTUBE_W, YOUTUBE_H, REELS_W, REELS_H,
-    FPS, SLIDE_DURATION, FADE_DURATION, OUTPUT_DIR, FFMPEG_BIN, FFPROBE_BIN,
+    FPS, SLIDE_DURATION, FADE_DURATION, OUTPUT_DIR,
+    FFMPEG_BIN, FFPROBE_BIN, HOOK_CARD_SECONDS,
 )
 
 
@@ -105,18 +106,61 @@ def _make_clip_from_photo(src: str, w: int, h: int, duration: float,
     return r.returncode == 0
 
 
+# ── Subtitle helpers ──────────────────────────────────────────────────────────
+
+def _shift_srt(srt_path: str, offset_ms: int) -> str:
+    """Return path to a new SRT file with all timestamps shifted by offset_ms."""
+    import re, tempfile
+
+    def _ms_to_ts(ms: int) -> str:
+        h = ms // 3_600_000; ms -= h * 3_600_000
+        m = ms // 60_000;    ms -= m * 60_000
+        s = ms // 1_000;     ms -= s * 1_000
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    def _shift_line(line: str) -> str:
+        m = re.match(
+            r"(\d+:\d+:\d+[,\.]\d+)\s*-->\s*(\d+:\d+:\d+[,\.]\d+)", line
+        )
+        if not m:
+            return line
+        def _parse(ts: str) -> int:
+            h, rest = ts.split(":", 1)
+            mi, rest = rest.split(":", 1)
+            s, ms_raw = re.split(r"[,\.]", rest)
+            return int(h)*3_600_000 + int(mi)*60_000 + int(s)*1_000 + int(ms_raw)
+        t0 = _parse(m.group(1)) + offset_ms
+        t1 = _parse(m.group(2)) + offset_ms
+        return f"{_ms_to_ts(t0)} --> {_ms_to_ts(t1)}"
+
+    content = Path(srt_path).read_text(encoding="utf-8")
+    shifted = "\n".join(_shift_line(l) for l in content.splitlines())
+    tmp = tempfile.mktemp(suffix="_shifted.srt")
+    Path(tmp).write_text(shifted, encoding="utf-8")
+    return tmp
+
+
 # ── Subtitle burn ─────────────────────────────────────────────────────────────
 
 def _burn_subtitles(raw_path: str, audio_path: str,
-                    srt_path: str, out_path: str) -> None:
-    """Attach audio + burn subtitles: raw video → final MP4."""
+                    srt_path: str, out_path: str,
+                    subtitle_offset_ms: int = 0) -> None:
+    """Attach audio + burn subtitles: raw video → final MP4.
+
+    subtitle_offset_ms: shift all subtitle timestamps forward by this amount
+                        (used when a hook card is prepended to the video).
+    """
     mode = _subtitle_mode()
+
+    # If hook card was added, write a shifted SRT file
+    active_srt = srt_path
+    if subtitle_offset_ms > 0:
+        active_srt = _shift_srt(srt_path, subtitle_offset_ms)
 
     if mode == "copy":
         vf_args = []
     elif mode == "libass":
-        safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-        # Phase F: improved subtitle style — bold, larger, drop shadow, bottom-centre
+        safe_srt = active_srt.replace("\\", "/").replace(":", "\\:")
         vf_args = [
             "-vf",
             f"subtitles={safe_srt}:"
@@ -127,7 +171,7 @@ def _burn_subtitles(raw_path: str, audio_path: str,
             f"Alignment=2,MarginV=60'"
         ]
     else:
-        vf_args = ["-vf", _drawtext_filter(srt_path)]
+        vf_args = ["-vf", _drawtext_filter(active_srt)]
 
     cmd = [
         FFMPEG_BIN, "-y",
@@ -215,12 +259,92 @@ def _drawtext_filter(srt_path: str) -> str:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+# ── Hook card ─────────────────────────────────────────────────────────────────
+
+def _make_hook_card(hook_text: str, first_clip: str,
+                    w: int, h: int, duration: float, out: str) -> bool:
+    """
+    Freeze the first frame of first_clip and burn large hook text on top.
+    Creates a HOOK_CARD_SECONDS-long card that prepends the video.
+
+    hook_text: the Director's hook line (1 sentence)
+    """
+    import platform, textwrap
+
+    # Font for hook card — larger & bolder than subtitle font
+    if platform.system() == "Darwin":
+        font_candidates = ["/System/Library/Fonts/Helvetica.ttc",
+                           "/Library/Fonts/Arial.ttf"]
+    else:
+        font_candidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                           "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"]
+    font_path = next((f for f in font_candidates if Path(f).exists()), "")
+    font_arg  = f"fontfile={font_path.replace(':', chr(92)+':')}:" if font_path else ""
+
+    # Wrap long text — max 30 chars per line for hook card
+    lines      = textwrap.wrap(hook_text, width=30)
+    line_h     = int(h * 0.075)          # font size ≈ 7.5% of frame height
+    total_h    = len(lines) * line_h
+    start_y    = (h - total_h) // 2      # vertically centred
+
+    # Build one drawtext filter per line
+    dt_parts = []
+    for i, line in enumerate(lines):
+        esc = (line.replace("\\", "\\\\")
+                   .replace("'",  "\\'")
+                   .replace(":",  "\\:")
+                   .replace(",",  "\\,"))
+        y = start_y + i * line_h
+        dt_parts.append(
+            f"drawtext={font_arg}"
+            f"fontsize={line_h}:fontcolor=white:borderw=4:bordercolor=black@0.95:"
+            f"x=(w-tw)/2:y={y}:"
+            f"text={esc}"
+        )
+
+    # Semi-transparent dark overlay behind text  (box behind text)
+    # We use drawtext box option directly
+    dt_with_box = []
+    for i, line in enumerate(lines):
+        esc = (line.replace("\\", "\\\\")
+                   .replace("'",  "\\'")
+                   .replace(":",  "\\:")
+                   .replace(",",  "\\,"))
+        y = start_y + i * line_h
+        dt_with_box.append(
+            f"drawtext={font_arg}"
+            f"fontsize={line_h}:fontcolor=white:borderw=5:bordercolor=black@0.9:"
+            f"box=1:boxcolor=black@0.45:boxborderw=12:"
+            f"x=(w-tw)/2:y={y}:"
+            f"text={esc}"
+        )
+
+    vf_filter = ",".join(dt_with_box)
+
+    cmd = [
+        FFMPEG_BIN, "-y",
+        "-i", first_clip,
+        "-vf", f"trim=0:{HOOK_CARD_SECONDS},setpts=PTS-STARTPTS,{vf_filter}",
+        "-t", str(duration),
+        "-r", str(FPS),
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-an", "-pix_fmt", "yuv420p",
+        out,
+    ]
+    r = subprocess.run(cmd, capture_output=True)
+    if r.returncode != 0:
+        print(f"  [Video] Hook card failed (non-fatal): {r.stderr[-300:].decode(errors='replace')}")
+    return r.returncode == 0
+
+
 def assemble_video(video_id: str, media_items, audio_path: str,
-                   srt_path: str) -> dict[str, str]:
+                   srt_path: str, hook_text: str = "") -> dict[str, str]:
     """
     Build YouTube (16:9) and Reels (9:16) MP4s from mixed media.
 
     media_items: list of MediaItem(path, kind) OR list of str (legacy photo-only)
+    hook_text:   if provided, a HOOK_CARD_SECONDS freeze-frame with bold text
+                 is prepended to the video.
     Returns {"youtube": path, "reels": path}
     """
     # Normalise legacy str list → MediaItem list
@@ -274,6 +398,15 @@ def assemble_video(video_id: str, media_items, audio_path: str,
             if len(segment_paths) < 2:
                 raise RuntimeError("Too few segments rendered successfully")
 
+            # ── Step 1b: hook card (prepend if hook_text provided) ────
+            if hook_text and segment_paths:
+                hook_seg = str(tmp_dir / "seg_hook.mp4")
+                ok = _make_hook_card(hook_text, segment_paths[0],
+                                     w, h, HOOK_CARD_SECONDS, hook_seg)
+                if ok and Path(hook_seg).stat().st_size > 1000:
+                    segment_paths = [hook_seg] + segment_paths
+                    print(f"  [Video] ✅ Hook card added ({HOOK_CARD_SECONDS}s)")
+
             # ── Step 2: get audio duration, loop segments if needed ───
             probe = subprocess.run(
                 [FFPROBE_BIN, "-v", "quiet", "-show_entries", "format=duration",
@@ -281,12 +414,16 @@ def assemble_video(video_id: str, media_items, audio_path: str,
                 capture_output=True, text=True,
             )
             audio_dur = float(probe.stdout.strip())
+            # Total visual duration = hook card + content clips
+            hook_dur  = HOOK_CARD_SECONDS if (hook_text and segment_paths) else 0
             clips_dur = len(segment_paths) * SLIDE_DURATION
 
-            # If clips total shorter than audio, repeat them
-            if clips_dur < audio_dur:
-                repeats = int(audio_dur / clips_dur) + 1
-                segment_paths = (segment_paths * repeats)[:int(audio_dur / SLIDE_DURATION) + 1]
+            # If clips total shorter than audio, repeat content segments
+            if clips_dur < audio_dur + hook_dur:
+                content_segs = segment_paths[1:] if hook_text else segment_paths
+                needed = int((audio_dur + hook_dur) / SLIDE_DURATION) + 2
+                segment_paths = (segment_paths[:1] if hook_text else []) + \
+                                (content_segs * (needed // max(len(content_segs), 1) + 1))[:needed]
 
             # ── Step 3: concat segments ───────────────────────────────
             list_file = tmp_dir / "concat.txt"
@@ -297,14 +434,15 @@ def assemble_video(video_id: str, media_items, audio_path: str,
             r = subprocess.run([
                 FFMPEG_BIN, "-y", "-f", "concat", "-safe", "0",
                 "-i", str(list_file),
-                "-t", str(audio_dur),
+                "-t", str(audio_dur + hook_dur),
                 "-c:v", "copy", raw_mp4,
             ], capture_output=True)
             if r.returncode != 0:
                 raise RuntimeError(f"Concat failed:\n{r.stderr[-500:].decode()}")
 
             # ── Step 4: audio + subtitles → final ────────────────────
-            _burn_subtitles(raw_mp4, audio_path, srt_path, out_path)
+            _burn_subtitles(raw_mp4, audio_path, srt_path, out_path,
+                            subtitle_offset_ms=int(hook_dur * 1000))
 
         finally:
             # Clean up temp segments

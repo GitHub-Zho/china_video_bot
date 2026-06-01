@@ -166,20 +166,21 @@ def _load_guidelines() -> str:
 # ── Groq director prompt ──────────────────────────────────────────────────────
 
 _SYSTEM = """\
-You are a creative director for short-form China travel videos targeting English-speaking audiences.
-Plan a complete video scene by scene. Each scene has its own spoken narration line + visual.
+You are a creative director for Instagram Reels / YouTube Shorts China travel videos.
+Target: {target_seconds}-second videos with {n_scenes} scenes × {secs_per_scene}s each.
+These are SHORT-FORM — every word must earn its place. Think viral Reels, not documentaries.
 
-STRICT Requirements — every single scene MUST meet ALL of these:
-1. narration MUST be 10-15 spoken words (a full sentence, NOT a phrase)
-   BAD:  "Explore the unknown"   (3 words — REJECTED)
-   BAD:  "Visit ancient villages" (3 words — REJECTED)
-   GOOD: "Most visitors never know this ancient village exists just two hours from Shanghai." (14 words ✓)
-   GOOD: "The rice terraces of Yunnan glow gold every October — and almost no one goes." (15 words ✓)
-2. Scene 0 MUST open with a surprising hook sentence (10-15 words) that makes someone stop scrolling
-3. visual_query MUST be ultra-specific: 10-15 words, include China location + mood + time of day
-4. Always prefix China locations: "China Guilin", "China Shanghai", etc.
-5. Last scene MUST end with soft CTA sentence: "Follow for more hidden China adventures."
-6. Target duration: {target_seconds} seconds total, {n_scenes} scenes × {secs_per_scene}s each
+STRICT scene rules (ALL must pass):
+1. narration: 6-10 spoken words — punchy, incomplete-feeling, makes viewer want the next scene
+   BAD:  "Explore the unknown" (generic, no China detail)
+   BAD:  "This is a very beautiful and incredible place in China" (too long, filler adjectives)
+   GOOD: "This town is 1,200 years old. Almost no one visits." (8+5 words, two punchy facts)
+   GOOD: "Three dollars. That's what breakfast costs here." (7 words, price shock)
+   GOOD: "What if I told you this place exists?" (8 words, curiosity gap)
+2. Scene 0 hook: MUST be a question or tension-starter (6-10 words), e.g. "What is hiding two hours from Shanghai?"
+3. Each scene must make the viewer NEED to see the next one — leave a gap, not a conclusion
+4. visual_query: 10-15 words, China location + time of day + light mood + one human/motion detail
+5. Last scene CTA: 5-8 words hinting at unseen content, e.g. "More places like this. Follow us."
 
 Return ONLY valid JSON — no markdown, no explanation:
 {{
@@ -189,12 +190,12 @@ Return ONLY valid JSON — no markdown, no explanation:
   "topic": "...",
   "audience_type": "explorer|newcomer",
   "mood": "cinematic|energetic|serene|dramatic",
-  "hook": "...(first 10-15 word hook sentence)",
+  "hook": "...(6-10 word question or tension-starter)",
   "cta": "...",
   "scenes": [
     {{
-      "narration": "...(MUST be 10-15 spoken words, a complete sentence)",
-      "visual_query": "...(10-15 words, location + mood + time of day)",
+      "narration": "...(6-10 words, punchy, leaves viewer wanting more)",
+      "visual_query": "...(10-15 words, location + mood + time of day + motion detail)",
       "duration": {secs_per_scene},
       "emotion": "cinematic|energetic|serene|dramatic|warm"
     }},
@@ -390,18 +391,18 @@ def _generate_brief_via_groq(
     if not raw_scenes:
         raise ValueError("Groq returned no scenes in the brief")
 
-    # Validate word counts — last scene is CTA (≥5 words ok), others need ≥8
+    # Validate word counts — scenes need ≥5 words (short-form style, 6-10 target)
     last_idx = len(raw_scenes) - 1
     short_scenes = [
         (i, s.get("narration", ""))
         for i, s in enumerate(raw_scenes)
-        if len(s.get("narration", "").split()) < (5 if i == last_idx else 8)
+        if len(s.get("narration", "").split()) < 5
     ]
     if short_scenes:
         examples = "; ".join(f'Scene {i}: "{n}"' for i, n in short_scenes[:3])
         raise ValueError(
-            f"Narrations too short in scenes: {examples}. "
-            f"Non-CTA scenes need ≥8 words; last (CTA) scene needs ≥5 words."
+            f"Narrations too short (<5 words) in scenes: {examples}. "
+            f"Target 6-10 words per scene."
         )
 
     scenes = [
