@@ -38,20 +38,39 @@ def main() -> int:
                         help="Target video length in seconds (default from settings)")
     parser.add_argument("--from-folder", metavar="PATH", default=None,
                         help="Build from your own images/clips instead of stock footage")
+    parser.add_argument("--style", default="",
+                        help="Name of a saved StyleProfile to imitate")
+    parser.add_argument("--learn-style", nargs=2, metavar=("SOURCE", "NAME"), default=None,
+                        help="Analyse a reference video (file or URL) and save it as a named style, then exit")
     parser.add_argument("--dry-run", action="store_true",
                         help="Assemble locally, skip YouTube upload")
     args = parser.parse_args()
 
     try:
+        # Style learning mode — analyse a reference, save profile, exit.
+        if args.learn_style:
+            from agents.style_analyst_agent import analyse_style
+            source, name = args.learn_style
+            sp = analyse_style(source, name)
+            if sp:
+                print(f"\n[run.py] ✅ Style '{name}' learned "
+                      f"({sp.color_mood}, {sp.subtitle_size} {sp.subtitle_position} subs, "
+                      f"~{sp.avg_clip_seconds}s/shot)")
+                return 0
+            print("\n[run.py] ❌ Style analysis failed")
+            return 1
+
         from orchestrator import run_pipeline, run_pipeline_from_folder
 
         if args.from_folder:
             result = run_pipeline_from_folder(
-                args.from_folder, dry_run=args.dry_run, target_seconds=args.seconds
+                args.from_folder, dry_run=args.dry_run,
+                target_seconds=args.seconds, style=args.style
             )
         else:
             result = run_pipeline(
-                audience_type=args.audience, dry_run=args.dry_run, prompt=args.prompt
+                audience_type=args.audience, dry_run=args.dry_run,
+                prompt=args.prompt, style=args.style
             )
 
         if result:

@@ -119,17 +119,34 @@ def _qa_and_remediate(vid: str, video_paths: dict) -> None:
 
 
 def run_pipeline(audience_type: str = None, dry_run: bool = False,
-                 prompt: str = "") -> str:
+                 prompt: str = "", style: str = "") -> str:
     """
     Full pipeline for one video.
     dry_run=True  → assembles video locally, skips YouTube upload.
     prompt        → free-text creative direction (e.g. "Xi'an Terracotta Warriors").
+    style         → name of a saved StyleProfile to imitate (Phase 5).
     Returns YouTube video_id string (or local mp4 path if dry_run).
     """
     vid = _video_id()
     print(f"\n{'='*55}")
     print(f"  China Video Bot  ·  {vid}")
     print(f"{'='*55}")
+
+    # ── 0. Optional style profile ────────────────────────────
+    render_params = None
+    if style:
+        from agents.style_analyst_agent import load_style
+        sp = load_style(style)
+        if sp:
+            hints = sp.to_render_hints()
+            render_params = VideoRenderParams(
+                fontsize_pct=hints["fontsize_pct"],
+                subtitle_y=hints["subtitle_y"],
+            )
+            print(f"  Style    : '{style}' ({sp.color_mood}, {sp.subtitle_size} subs, "
+                  f"~{sp.avg_clip_seconds}s/shot)")
+        else:
+            print(f"  ⚠️  Style '{style}' not found — using defaults")
 
     # ── 1. Director: plan the entire video scene-by-scene ────
     print("\n[1/5] Director planning scenes…")
@@ -171,7 +188,8 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False,
     print("\n[4/5] Assembling video…")
     video_paths = assemble_video(vid, media_items, audio_path, srt_path,
                                   hook_text=brief.hook,
-                                  scene_durations=scene_durations)
+                                  scene_durations=scene_durations,
+                                  params=render_params)
 
     # ── Quality check + auto-remediation (Phase 3) ───────────────
     print("\n  [QC] Running post-generation checks…")
@@ -205,6 +223,7 @@ def run_pipeline_from_folder(
     folder_path: str,
     dry_run: bool = False,
     target_seconds: float | None = None,
+    style: str = "",
 ) -> str:
     """
     Alternate pipeline: user provides their own images/clips.
@@ -226,6 +245,16 @@ def run_pipeline_from_folder(
     print(f"  China Video Bot (from folder)  ·  {vid}")
     print(f"  Folder: {folder_path}")
     print(f"{'='*55}")
+
+    render_params = None
+    if style:
+        from agents.style_analyst_agent import load_style
+        sp = load_style(style)
+        if sp:
+            hints = sp.to_render_hints()
+            render_params = VideoRenderParams(fontsize_pct=hints["fontsize_pct"],
+                                              subtitle_y=hints["subtitle_y"])
+            print(f"  Style    : '{style}'")
 
     # ── 1. Analyse user media with Claude Vision ──────────────
     print("\n[1/5] Analysing your media with Claude Vision…")
@@ -256,7 +285,8 @@ def run_pipeline_from_folder(
     print("\n[4/5] Assembling video…")
     video_paths = assemble_video(vid, media_items, audio_path, srt_path,
                                   hook_text=brief.hook,
-                                  scene_durations=scene_durations)
+                                  scene_durations=scene_durations,
+                                  params=render_params)
 
     # ── Quality check + auto-remediation (Phase 3) ───────────────
     print("\n  [QC] Running post-generation checks…")
