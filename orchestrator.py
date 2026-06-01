@@ -10,7 +10,7 @@ from pathlib import Path
 
 from agents.director_agent   import create_brief
 from agents.media_agent      import download_media
-from agents.voice_agent      import generate_voice
+from agents.voice_agent      import generate_voice, generate_voice_scenes
 from agents.video_agent      import assemble_video
 from agents.publisher_agent  import upload_video
 from agents.analytics_agent  import run_pending_analytics, extract_insights
@@ -32,10 +32,14 @@ def _probe_duration(path: str) -> float:
     return float(r.stdout.strip())
 
 
-def _quality_check(video_path: str, audio_path: str) -> bool:
+def _quality_check(video_path: str, audio_path: str,
+                   hook_seconds: float = 0.0) -> bool:
     """
     Post-generation sanity check.
     Returns True if video passes; prints warnings but never raises.
+
+    hook_seconds: the hook card adds silent video time at the start, so the
+                  expected video duration = audio + hook_seconds.
     """
     ok = True
     try:
@@ -53,14 +57,17 @@ def _quality_check(video_path: str, audio_path: str) -> bool:
 
         vid_dur   = _probe_duration(video_path)
         audio_dur = _probe_duration(audio_path)
-        diff      = abs(vid_dur - audio_dur)
+        expected  = audio_dur + hook_seconds
+        diff      = abs(vid_dur - expected)
 
         if diff > 2.0:
-            print(f"  [QC] ⚠️  Duration mismatch — video {vid_dur:.1f}s vs audio {audio_dur:.1f}s "
-                  f"(Δ{diff:.1f}s)")
+            print(f"  [QC] ⚠️  Duration mismatch — video {vid_dur:.1f}s vs "
+                  f"expected {expected:.1f}s (audio {audio_dur:.1f}s + hook {hook_seconds:.0f}s, "
+                  f"Δ{diff:.1f}s)")
             ok = False
         else:
-            print(f"  [QC] ✅ Duration: {vid_dur:.1f}s (audio {audio_dur:.1f}s, Δ{diff:.1f}s)")
+            print(f"  [QC] ✅ Duration: {vid_dur:.1f}s "
+                  f"(audio {audio_dur:.1f}s + hook {hook_seconds:.0f}s, Δ{diff:.1f}s)")
 
         # Quick stream check — ffprobe will error if the file is corrupted
         r = subprocess.run(
@@ -108,8 +115,17 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False) -> str:
         json.dumps(brief.to_metadata_dict(), indent=2)
     )
 
-    # ── 2. Media: download clips/photos for each scene ───────
-    print("\n[2/5] Downloading media…")
+    # ── 2. Voice + Subtitles (BEFORE media — Phase 1) ────────
+    # TTS runs first so we know each scene's exact spoken duration. The video
+    # assembler then sizes each clip to its narration, keeping visuals in sync.
+    print("\n[2/5] Generating voiceover + subtitles…")
+    narrations = [s.narration for s in brief.scenes]
+    audio_path, srt_path, scene_durations = generate_voice_scenes(vid, narrations)
+    audio_dur = _probe_duration(audio_path)
+    print(f"      Audio: {audio_dur:.1f}s  |  Script: {len(brief.script.split())} words")
+
+    # ── 3. Media: download clips/photos for each scene ───────
+    print("\n[3/5] Downloading media…")
     visual_queries = [s.visual_query for s in brief.scenes]
     media_items = download_media(vid, visual_queries)
     if len(media_items) < 2:
@@ -120,23 +136,17 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False) -> str:
     photos = sum(1 for m in media_items if m.kind == "photo")
     print(f"      {len(media_items)} items ready ({clips} clips, {photos} photos)")
 
-    # ── 3. Voice + Subtitles ─────────────────────────────────
-    print("\n[3/5] Generating voiceover + subtitles…")
-    audio_path, srt_path = generate_voice(vid, brief.script)
-
-    audio_dur = _probe_duration(audio_path)
-    print(f"      Audio: {audio_dur:.1f}s  |  Script: {len(brief.script.split())} words")
-
-    # ── 4. Video assembly ─────────────────────────────────────
+    # ── 4. Video assembly (scene-timed) ──────────────────────
     print("\n[4/5] Assembling video…")
     video_paths = assemble_video(vid, media_items, audio_path, srt_path,
-                                  hook_text=brief.hook)
+                                  hook_text=brief.hook,
+                                  scene_durations=scene_durations)
 
     # ── Quality check (technical + Claude Vision frame analysis) ─
     print("\n  [QC] Running post-generation checks…")
     yt_path = video_paths.get("youtube", "")
     if yt_path:
-        _quality_check(yt_path, audio_path)
+        _quality_check(yt_path, audio_path, hook_seconds=HOOK_CARD_SECONDS)
         qa_check(yt_path, hook_seconds=HOOK_CARD_SECONDS)
 
     if dry_run:
@@ -204,22 +214,24 @@ def run_pipeline_from_folder(
     photos = sum(1 for m in media_items if m.kind == "photo")
     print(f"\n[2/5] Media ready: {len(media_items)} items ({clips} clips, {photos} photos)")
 
-    # ── 3. Voice + Subtitles ─────────────────────────────────
+    # ── 3. Voice + Subtitles (scene-timed) ───────────────────
     print("\n[3/5] Generating voiceover + subtitles…")
-    audio_path, srt_path = generate_voice(vid, brief.script)
+    narrations = [s.narration for s in brief.scenes]
+    audio_path, srt_path, scene_durations = generate_voice_scenes(vid, narrations)
     audio_dur = _probe_duration(audio_path)
     print(f"      Audio: {audio_dur:.1f}s  |  Script: {len(brief.script.split())} words")
 
-    # ── 4. Video assembly ─────────────────────────────────────
+    # ── 4. Video assembly (scene-timed) ──────────────────────
     print("\n[4/5] Assembling video…")
     video_paths = assemble_video(vid, media_items, audio_path, srt_path,
-                                  hook_text=brief.hook)
+                                  hook_text=brief.hook,
+                                  scene_durations=scene_durations)
 
     # ── Quality check ─────────────────────────────────────────
     print("\n  [QC] Running post-generation checks…")
     yt_path = video_paths.get("youtube", "")
     if yt_path:
-        _quality_check(yt_path, audio_path)
+        _quality_check(yt_path, audio_path, hook_seconds=HOOK_CARD_SECONDS)
         qa_check(yt_path, hook_seconds=HOOK_CARD_SECONDS)
 
     if dry_run:

@@ -118,8 +118,12 @@
 > 状态标记：⬜ 未开始 / 🔄 进行中 / ✅ 完成
 > 每个 Phase 末尾的【验证关卡】必须通过才能进下一个。
 
-### Phase 1 — SRT 驱动时长 ⬜
+### Phase 1 — SRT 驱动时长 ✅（2026-06-01 完成）
 **目标：** 修复"画面与字幕错位"这个真实 bug。让每个场景的时长由旁白决定，而非硬编码。
+
+**实现结果：** 新增 `generate_voice_scenes()` 逐场景生成 TTS，返回精确时长。
+装配时每个 clip 用对应场景时长（clamp 到 [2,8]s）。验证：8场景时长
+`[3.5,4.2,4.5,4.7,4.4,4.2,4.2,4.1]` 不再是死板的 4s，clip[i]==narration[i] 时长，对齐由构造保证。
 
 **改动文件：**
 - `orchestrator.py`：把 Voice 移到 Media 之前；新增 `parse_srt_scene_timings()`
@@ -352,8 +356,8 @@ YouTube数据(3天后) → extract_insights → insights.json
 - [x] Kokoro TTS + hook card + 比例字幕
 - [x] 学习日志 + guidelines 系统
 - [x] 用户素材模式（media_analyst）
-- [ ] **Phase 1 — SRT 驱动时长** ← 下一步
-- [ ] Phase 2 — 素材质量（多源 + 优中选优）
+- [x] **Phase 1 — SRT 驱动时长** ✅
+- [ ] **Phase 2 — 素材质量（多源 + 优中选优）** ← 下一步
 - [ ] Phase 3 — 装配拆分 + QA 自动微调
 - [ ] Phase 4 — CLI + 自主运行 + 话题去重
 - [ ] Phase 5 — 风格参考层

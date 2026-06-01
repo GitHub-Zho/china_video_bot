@@ -359,15 +359,22 @@ def _make_hook_card(hook_text: str, first_clip: str,
 
 
 def assemble_video(video_id: str, media_items, audio_path: str,
-                   srt_path: str, hook_text: str = "") -> dict[str, str]:
+                   srt_path: str, hook_text: str = "",
+                   scene_durations: list[float] | None = None) -> dict[str, str]:
     """
     Build YouTube (16:9) and Reels (9:16) MP4s from mixed media.
 
     media_items: list of MediaItem(path, kind) OR list of str (legacy photo-only)
     hook_text:   if provided, a HOOK_CARD_SECONDS freeze-frame with bold text
                  is prepended to the video.
+    scene_durations: Phase 1 — per-scene durations from TTS. When provided,
+                 segment i is rendered at scene_durations[i] (clamped to
+                 [MIN_CLIP_SECONDS, MAX_CLIP_SECONDS]) so visuals stay in sync
+                 with narration. When None, falls back to SLIDE_DURATION.
     Returns {"youtube": path, "reels": path}
     """
+    from config.settings import MIN_CLIP_SECONDS, MAX_CLIP_SECONDS
+
     # Normalise legacy str list → MediaItem list
     from agents.media_agent import MediaItem
     if media_items and isinstance(media_items[0], str):
@@ -375,6 +382,15 @@ def assemble_video(video_id: str, media_items, audio_path: str,
 
     if len(media_items) < 2:
         raise ValueError(f"Need ≥2 media items, got {len(media_items)}")
+
+    # Resolve per-segment durations
+    def _seg_duration(i: int) -> float:
+        if scene_durations and i < len(scene_durations):
+            d = scene_durations[i]
+            if d <= 0:
+                return SLIDE_DURATION
+            return max(MIN_CLIP_SECONDS, min(MAX_CLIP_SECONDS, d))
+        return SLIDE_DURATION
 
     out_dir = Path(OUTPUT_DIR) / video_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -393,26 +409,28 @@ def assemble_video(video_id: str, media_items, audio_path: str,
 
         tmp_dir = Path(tempfile.mkdtemp())
         segment_paths = []
+        rendered_durs = []   # actual duration requested per rendered segment
 
         try:
             # ── Step 1: render each item to a normalised segment ──────
+            # Each segment is sized to its scene's narration duration (Phase 1)
             for i, item in enumerate(media_items):
                 seg = str(tmp_dir / f"seg_{i:03d}.mp4")
+                dur = _seg_duration(i)
                 ok  = False
 
                 if item.kind == "clip":
-                    ok = _make_clip_from_video(item.path, w, h,
-                                               SLIDE_DURATION, seg)
+                    ok = _make_clip_from_video(item.path, w, h, dur, seg)
                     if not ok:
                         print(f"    clip {i} render failed, falling back to photo mode")
 
                 if not ok:  # photo or failed clip
                     direction = random.randint(0, len(_PAN_DIRECTIONS) - 1)
-                    ok = _make_clip_from_photo(item.path, w, h,
-                                               SLIDE_DURATION, seg, direction)
+                    ok = _make_clip_from_photo(item.path, w, h, dur, seg, direction)
 
                 if ok and Path(seg).stat().st_size > 1000:
                     segment_paths.append(seg)
+                    rendered_durs.append(dur)
                 else:
                     print(f"    item {i} skipped (render failed)")
 
@@ -420,31 +438,38 @@ def assemble_video(video_id: str, media_items, audio_path: str,
                 raise RuntimeError("Too few segments rendered successfully")
 
             # ── Step 1b: hook card (prepend if hook_text provided) ────
+            has_hook = False
             if hook_text and segment_paths:
                 hook_seg = str(tmp_dir / "seg_hook.mp4")
                 ok = _make_hook_card(hook_text, segment_paths[0],
                                      w, h, HOOK_CARD_SECONDS, hook_seg)
                 if ok and Path(hook_seg).stat().st_size > 1000:
                     segment_paths = [hook_seg] + segment_paths
+                    has_hook = True
                     print(f"  [Video] ✅ Hook card added ({HOOK_CARD_SECONDS}s)")
 
-            # ── Step 2: get audio duration, loop segments if needed ───
+            # ── Step 2: get audio duration ────────────────────────────
             probe = subprocess.run(
                 [FFPROBE_BIN, "-v", "quiet", "-show_entries", "format=duration",
                  "-of", "csv=p=0", audio_path],
                 capture_output=True, text=True,
             )
             audio_dur = float(probe.stdout.strip())
-            # Total visual duration = hook card + content clips
-            hook_dur  = HOOK_CARD_SECONDS if (hook_text and segment_paths) else 0
-            clips_dur = len(segment_paths) * SLIDE_DURATION
+            hook_dur  = HOOK_CARD_SECONDS if has_hook else 0
 
-            # If clips total shorter than audio, repeat content segments
-            if clips_dur < audio_dur + hook_dur:
-                content_segs = segment_paths[1:] if hook_text else segment_paths
-                needed = int((audio_dur + hook_dur) / SLIDE_DURATION) + 2
-                segment_paths = (segment_paths[:1] if hook_text else []) + \
-                                (content_segs * (needed // max(len(content_segs), 1) + 1))[:needed]
+            # Total content duration from what we actually rendered
+            content_dur = sum(rendered_durs)
+
+            # Only loop if content is meaningfully shorter than audio.
+            # With per-scene durations, content_dur ≈ audio_dur, so this is skipped.
+            if content_dur < audio_dur - 1.0:
+                content_segs = segment_paths[1:] if has_hook else segment_paths
+                avg = content_dur / max(len(content_segs), 1)
+                needed = int((audio_dur - content_dur) / max(avg, 1)) + 1
+                extra  = (content_segs * (needed // max(len(content_segs), 1) + 1))[:needed]
+                segment_paths = segment_paths + extra
+                print(f"  [Video] Content {content_dur:.1f}s < audio {audio_dur:.1f}s "
+                      f"— looped {len(extra)} extra segment(s)")
 
             # ── Step 3: concat segments ───────────────────────────────
             list_file = tmp_dir / "concat.txt"

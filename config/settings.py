@@ -33,9 +33,13 @@ TTS_SPEED  = 0.95             # slightly slower = clearer
 YOUTUBE_W, YOUTUBE_H = 1920, 1080
 REELS_W,   REELS_H   = 1080, 1920
 FPS               = 25
-SLIDE_DURATION    = 4.0       # seconds each clip/photo is shown (was 5s)
+SLIDE_DURATION    = 4.0       # fallback per-clip duration when no scene timing
 FADE_DURATION     = 0.5       # seconds crossfade (snappier)
 IMAGES_PER_VIDEO  = 10        # max media items per video
+
+# Phase 1: per-scene clip duration clamps (driven by TTS narration length)
+MIN_CLIP_SECONDS  = 2.0       # never show a clip shorter than this
+MAX_CLIP_SECONDS  = 8.0       # never show a clip longer than this
 
 # Target durations — shorter = more Reels-native, better completion rate
 TARGET_YOUTUBE_SECONDS = 32   # ~8 scenes × 4s

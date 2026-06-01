@@ -165,7 +165,151 @@ async def _generate_edge_async(script: str, audio_path: str, srt_path: str) -> N
     Path(srt_path).write_text("\n".join(all_blocks), encoding="utf-8")
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# ── Per-scene generation (Phase 1 — SRT-driven timing) ────────────────────────
+
+def _generate_kokoro_scenes(
+    narrations: list[str], audio_path: str, srt_path: str
+) -> list[float] | None:
+    """
+    Generate TTS scene-by-scene with Kokoro. Each narration = one scene = one unit.
+    Returns list of per-scene durations (seconds), or None if Kokoro unavailable.
+
+    This is the accurate path: because we generate each scene separately, we know
+    EXACTLY how long each scene's audio is — no SRT re-parsing guesswork.
+    """
+    try:
+        from kokoro_onnx import Kokoro
+        import soundfile as sf
+        import subprocess
+        import numpy as np
+    except ImportError:
+        return None
+
+    if not Path(KOKORO_MODEL).exists() or not Path(KOKORO_VOICES).exists():
+        return None
+
+    try:
+        k = Kokoro(KOKORO_MODEL, KOKORO_VOICES)
+
+        all_samples = []
+        sample_rate = 24000
+        scene_durations: list[float] = []
+        scene_timings:   list[tuple[int, int, str]] = []   # (start_ms, end_ms, text)
+
+        for narration in narrations:
+            text = narration.strip()
+            if not text:
+                # Empty narration — give it a tiny silent slot so indices stay aligned
+                scene_durations.append(0.0)
+                scene_timings.append((0, 0, ""))
+                continue
+            samples, sr = k.create(text, voice=KOKORO_VOICE, speed=KOKORO_SPEED)
+            sample_rate = sr
+            start_ms = int(len(all_samples) / sr * 1000)
+            all_samples.extend(samples.tolist())
+            end_ms   = int(len(all_samples) / sr * 1000)
+            scene_durations.append((end_ms - start_ms) / 1000.0)
+            scene_timings.append((start_ms, end_ms, text))
+
+        # ── WAV → MP3 ────────────────────────────────────────────────────────
+        import tempfile
+        wav_tmp = tempfile.mktemp(suffix=".wav")
+        sf.write(wav_tmp, np.array(all_samples, dtype='float32'), sample_rate)
+        from config.settings import FFMPEG_BIN
+        r = subprocess.run([
+            FFMPEG_BIN, "-y", "-i", wav_tmp,
+            "-codec:a", "libmp3lame", "-qscale:a", "4", audio_path
+        ], capture_output=True)
+        Path(wav_tmp).unlink(missing_ok=True)
+        if r.returncode != 0:
+            print(f"  [Voice] Kokoro MP3 conversion failed")
+            return None
+
+        # ── Build SRT from scene timings ─────────────────────────────────────
+        blocks, idx = [], 1
+        for t0, t1, text in scene_timings:
+            if not text:
+                continue
+            b = _text_to_srt_blocks(idx, text, t0, t1)
+            blocks.extend(b)
+            idx += max(1, (len(text.split()) + 5) // 6)
+        Path(srt_path).write_text("\n".join(blocks), encoding="utf-8")
+
+        total = sum(scene_durations)
+        print(f"  [Voice] ✅ Kokoro: {total:.1f}s, {len(narrations)} scenes, "
+              f"voice={KOKORO_VOICE}")
+        print(f"  [Voice] Per-scene durations: "
+              f"{[round(d,1) for d in scene_durations]}")
+        return scene_durations
+
+    except Exception as e:
+        print(f"  [Voice] Kokoro per-scene error ({e})")
+        return None
+
+
+def _generate_edge_scenes(
+    narrations: list[str], audio_path: str, srt_path: str
+) -> list[float]:
+    """
+    edge-tts fallback: generate whole script, approximate per-scene durations
+    by word-count proportion. Less precise than Kokoro but keeps pipeline working.
+    """
+    script = " ".join(n.strip() for n in narrations if n.strip())
+    asyncio.run(_generate_edge_async(script, audio_path, srt_path))
+
+    # Approximate scene durations from total audio duration × word-count share
+    from config.settings import FFPROBE_BIN
+    import subprocess
+    probe = subprocess.run(
+        [FFPROBE_BIN, "-v", "quiet", "-show_entries", "format=duration",
+         "-of", "csv=p=0", audio_path],
+        capture_output=True, text=True,
+    )
+    try:
+        total_dur = float(probe.stdout.strip())
+    except Exception:
+        total_dur = sum(len(n.split()) for n in narrations) / 2.5  # ~2.5 wps guess
+
+    total_words = sum(max(1, len(n.split())) for n in narrations)
+    scene_durations = [
+        total_dur * max(1, len(n.split())) / total_words for n in narrations
+    ]
+    print(f"  [Voice] edge-tts approx per-scene: "
+          f"{[round(d,1) for d in scene_durations]}")
+    return scene_durations
+
+
+def generate_voice_scenes(
+    video_id: str, narrations: list[str]
+) -> tuple[str, str, list[float]]:
+    """
+    Phase 1 entry point: generate voiceover scene-by-scene.
+
+    Returns (audio_path, srt_path, scene_durations) where scene_durations[i]
+    is the exact spoken length of narrations[i] in seconds.
+
+    The video assembler uses scene_durations to size each scene's clip,
+    so visuals stay in sync with narration (no more hardcoded SLIDE_DURATION).
+    """
+    base_dir   = Path(OUTPUT_DIR) / video_id
+    base_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = str(base_dir / "audio.mp3")
+    srt_path   = str(base_dir / "subtitles.srt")
+
+    print(f"  [Voice] Generating TTS for {len(narrations)} scenes")
+
+    # Try Kokoro (accurate, per-scene)
+    durations = _generate_kokoro_scenes(narrations, audio_path, srt_path)
+    if durations is not None:
+        return audio_path, srt_path, durations
+
+    # Fall back to edge-tts (approximate per-scene)
+    print(f"  [Voice] Using edge-tts fallback (voice={EDGE_VOICE})")
+    durations = _generate_edge_scenes(narrations, audio_path, srt_path)
+    return audio_path, srt_path, durations
+
+
+# ── Legacy API (whole-script, kept for backward compat) ───────────────────────
 
 def generate_voice(video_id: str, script: str) -> tuple[str, str]:
     """
