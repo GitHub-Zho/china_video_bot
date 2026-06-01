@@ -36,6 +36,26 @@ def _ticks_to_srt(ticks: int) -> str:
     return _ms_to_srt(ticks // 10_000)
 
 
+def _scene_srt(scene_timings: list[tuple[int, int, str]]) -> list[str]:
+    """
+    Build an SRT with ONE cue per scene — full narration text, spanning the
+    scene's full audio window. No ≤6-word splitting (that caused flashing + gaps).
+
+    scene_timings: list of (start_ms, end_ms, text), one per scene.
+    """
+    blocks: list[str] = []
+    idx = 1
+    for t0, t1, text in scene_timings:
+        text = text.strip()
+        if not text or t1 <= t0:
+            continue
+        blocks += [str(idx),
+                   f"{_ms_to_srt(t0)} --> {_ms_to_srt(t1)}",
+                   text.upper(), ""]
+        idx += 1
+    return blocks
+
+
 def _text_to_srt_blocks(start_idx: int, text: str,
                          t0_ms: int, t1_ms: int) -> list[str]:
     """Split one sentence into ≤6-word SRT cues, proportionally timed."""
@@ -225,14 +245,11 @@ def _generate_kokoro_scenes(
             print(f"  [Voice] Kokoro MP3 conversion failed")
             return None
 
-        # ── Build SRT from scene timings ─────────────────────────────────────
-        blocks, idx = [], 1
-        for t0, t1, text in scene_timings:
-            if not text:
-                continue
-            b = _text_to_srt_blocks(idx, text, t0, t1)
-            blocks.extend(b)
-            idx += max(1, (len(text.split()) + 5) // 6)
+        # ── Build SRT: ONE cue per scene, full narration, full duration ──────
+        # One subtitle per scene (not ≤6-word chunks) means: no flashing, no
+        # mid-sentence gaps, and the subtitle stays up the whole time the scene's
+        # clip is on screen. The drawtext filter word-wraps it to fit the frame.
+        blocks = _scene_srt(scene_timings)
         Path(srt_path).write_text("\n".join(blocks), encoding="utf-8")
 
         total = sum(scene_durations)

@@ -153,10 +153,23 @@ def _burn_subtitles(raw_path: str, audio_path: str,
     """
     mode = _subtitle_mode()
 
-    # If hook card was added, write a shifted SRT file
-    active_srt = srt_path
+    # If a hook card was prepended, both the subtitles AND the audio must be
+    # shifted forward by the hook duration so voice + subtitle + visual all
+    # start together at the end of the hook (fixes the voice-leads-subtitle lag).
+    active_srt   = srt_path
+    active_audio = audio_path
     if subtitle_offset_ms > 0:
         active_srt = _shift_srt(srt_path, subtitle_offset_ms)
+        delayed_audio = tempfile.mktemp(suffix="_delayed.m4a")
+        da = subprocess.run([
+            FFMPEG_BIN, "-y", "-i", audio_path,
+            "-af", f"adelay={subtitle_offset_ms}|{subtitle_offset_ms}",
+            "-c:a", "aac", delayed_audio,
+        ], capture_output=True)
+        if da.returncode == 0 and Path(delayed_audio).exists():
+            active_audio = delayed_audio
+        else:
+            print("  [Video] ⚠️  audio delay failed — voice may lead subtitles")
 
     if mode == "copy":
         vf_args = []
@@ -183,7 +196,7 @@ def _burn_subtitles(raw_path: str, audio_path: str,
     cmd = [
         FFMPEG_BIN, "-y",
         "-i", raw_path,
-        "-i", audio_path,
+        "-i", active_audio,
         *vf_args,
         "-c:v", "libx264" if vf_args else "copy",
         "-crf", "20", "-preset", "fast",
@@ -202,7 +215,7 @@ def _drawtext_filter(srt_path: str, tmp_dir: Path,
                      video_w: int = 1920, video_h: int = 1080,
                      fontsize_pct: float = 0.040,
                      subtitle_y: float = 0.80,
-                     max_cue_dur: float = 3.5) -> str:
+                     max_cue_dur: float = 10.0) -> str:
     """
     Build a drawtext filter chain — one per SRT cue, time-gated with enable='between(t,…)'.
 
@@ -268,23 +281,28 @@ def _drawtext_filter(srt_path: str, tmp_dir: Path,
         if not txt:
             continue
 
-        # Wrap to frame width so text never clips horizontally (esp. narrow Reels)
-        wrapped = "\n".join(textwrap.wrap(txt, width=max_chars)) or txt
+        # Wrap to frame width, then render EACH line as its own centered drawtext
+        # (multi-line textfile left-aligns; per-line drawtext centers each line).
+        lines    = textwrap.wrap(txt, width=max_chars) or [txt]
+        line_gap = int(fontsize * 1.30)
+        base_y   = int(video_h * subtitle_y)        # bottom anchor of the block
+        n_lines  = len(lines)
 
-        # Write cue text to a file → textfile= reads it literally (no escaping hell)
-        cue_file = tmp_dir / f"cue_{cue_n:03d}.txt"
-        cue_file.write_text(wrapped, encoding="utf-8")
-        tf_path = str(cue_file).replace(":", "\\:")
-        cue_n += 1
-
-        parts.append(
-            f"drawtext={font_arg}"
-            f"fontsize={fontsize}:fontcolor=white:borderw={borderw}:bordercolor=black@0.9:"
-            f"box=1:boxcolor=black@0.45:boxborderw=10:"
-            f"x=(w-tw)/2:y={y_pos}:"
-            f"textfile={tf_path}:"
-            f"enable='between(t,{t0:.3f},{t1:.3f})'"
-        )
+        for li, line in enumerate(lines):
+            cue_file = tmp_dir / f"cue_{cue_n:03d}.txt"
+            cue_file.write_text(line, encoding="utf-8")
+            tf_path = str(cue_file).replace(":", "\\:")
+            cue_n += 1
+            # Bottom-anchor: last line at base_y, earlier lines stack upward
+            y_line = base_y - (n_lines - 1 - li) * line_gap
+            parts.append(
+                f"drawtext={font_arg}"
+                f"fontsize={fontsize}:fontcolor=white:borderw={borderw}:bordercolor=black@0.9:"
+                f"box=1:boxcolor=black@0.45:boxborderw=10:"
+                f"x=(w-tw)/2:y={y_line}:"
+                f"textfile={tf_path}:"
+                f"enable='between(t,{t0:.3f},{t1:.3f})'"
+            )
 
     return ",".join(parts) if parts else "null"
 
