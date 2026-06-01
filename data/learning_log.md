@@ -134,3 +134,31 @@ or human reviewer can understand the WHY behind every major parameter — not ju
 **Status:** ✅ Documentation only
 
 ---
+
+## [4] 2026-06-02 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 8 issue(s):
+    ⚠️ [subtitle] t=0.5s — Subtitle text is very large and takes up a significant portion of the frame, obscuring the background scenery.
+    ⚠️ [subtitle] t=2.3s — Subtitle text is very large and takes up a significant portion of the frame, obscuring the background scenery.
+    ⚠️ [subtitle] t=6.0s — Subtitle text is very large and takes up a significant portion of the frame, obscuring the background scenery.
+    ⚠️ [subtitle] t=10.0s — Subtitle text is very large and takes up a significant portion of the frame, obscuring the background scenery.
+    ⚠️ [subtitle] t=14.0s — Subtitle text is very large and takes up a significant portion of the frame, obscuring the background scenery.
+    ⚠️ [subtitle] t=18.0s — Subtitle text is very large and takes up a significant portion of the frame, obscuring the background scenery.
+    ⚠️ [subtitle] t=22.0s — Subtitle text is very large and takes up a significant portion of the frame, obscuring the background scenery.
+    ⚠️ [subtitle] t=24.8s — Subtitle text is very large and takes up a significant portion of the frame, obscuring the background scenery.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---

@@ -23,8 +23,10 @@ PIXABAY_API_KEY     = os.getenv("PIXABAY_API_KEY")
 GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY")
 
 # Vision model for the VERIFICATION layer (independent from Groq generator).
+# flash-lite has the most generous free-tier rate limits (~15 RPM / 1000+ RPD)
+# and is plenty for judging preview thumbnails + QA frames.
 # Swap to a Claude model here if upgrading to paid Anthropic vision later.
-GEMINI_VISION_MODEL = "gemini-2.5-flash"
+GEMINI_VISION_MODEL = "gemini-2.5-flash-lite"
 
 # === Claude model (haiku = cheapest, fast enough for scripts) ===
 CLAUDE_MODEL = "claude-haiku-3-5"
