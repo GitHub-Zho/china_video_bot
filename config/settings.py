@@ -20,6 +20,11 @@ OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY")
 PEXELS_API_KEY      = os.getenv("PEXELS_API_KEY")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
 PIXABAY_API_KEY     = os.getenv("PIXABAY_API_KEY")
+GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY")
+
+# Vision model for the VERIFICATION layer (independent from Groq generator).
+# Swap to a Claude model here if upgrading to paid Anthropic vision later.
+GEMINI_VISION_MODEL = "gemini-2.5-flash"
 
 # === Claude model (haiku = cheapest, fast enough for scripts) ===
 CLAUDE_MODEL = "claude-haiku-3-5"

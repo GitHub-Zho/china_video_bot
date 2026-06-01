@@ -1,8 +1,8 @@
 """
-QA Agent — automatic video quality check via frame sampling + Claude Vision.
+QA Agent — automatic video quality check via frame sampling + Gemini Vision.
 
 Runs after assembly. Extracts N frames at strategic intervals, sends them to
-Claude Vision, and returns a structured list of issues.
+Gemini Vision (the verifier), and returns a structured list of issues.
 
 Called by the orchestrator after assemble_video(). If issues are found, they
 are printed and written to the learning log so the Director can improve.
@@ -62,9 +62,11 @@ def _extract_frames(video_path: str, timestamps: list[float], out_dir: Path) -> 
     results = []
     for t in timestamps:
         out = out_dir / f"frame_{t:.2f}.jpg"
+        # Downscale to 720px wide — keeps subtitles/content legible for the
+        # verifier while shrinking the payload ~5× (avoids proxy/timeout issues).
         r = subprocess.run([
             FFMPEG_BIN, "-y", "-ss", str(t), "-i", video_path,
-            "-frames:v", "1", "-q:v", "3", str(out)
+            "-frames:v", "1", "-vf", "scale=720:-1", "-q:v", "5", str(out)
         ], capture_output=True)
         if r.returncode == 0 and out.exists() and out.stat().st_size > 1000:
             results.append((t, out))
@@ -105,39 +107,16 @@ def _strategic_timestamps(duration: float, hook_seconds: float = 2.0) -> list[fl
     return [t for t in ts if 0 <= t < duration]
 
 
-# ── Claude Vision analysis ────────────────────────────────────────────────────
+# ── Gemini Vision analysis ────────────────────────────────────────────────────
 
-def _analyse_frames_with_claude(frames: list[tuple[float, Path]]) -> list[QAIssue]:
-    """Send sampled frames to Claude Vision and return issues found."""
-    import base64, json, anthropic
-
-    if not frames:
-        return []
-
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("  [QA] ANTHROPIC_API_KEY not set — skipping Vision check")
-        return []
-
-    client  = anthropic.Anthropic(api_key=api_key)
-    content = []
-
-    for t, path in frames:
-        b64 = base64.standard_b64encode(path.read_bytes()).decode()
-        content.append({
-            "type": "image",
-            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}
-        })
-        content.append({"type": "text", "text": f"[Frame at t={t:.1f}s]"})
-
-    content.append({"type": "text", "text": """
+_QA_PROMPT = """\
 You are a video QA reviewer for short-form China travel videos (Instagram Reels / YouTube Shorts).
 
 Review each frame (labelled with its timestamp) and identify any quality issues.
 
 Check for:
 1. SUBTITLE issues: text not visible, too small to read, positioned too low/high (cut off by platform UI),
-   subtitle still showing when it should have cleared, text overflowing the frame
+   subtitle still showing when it should have cleared, text overflowing the frame, leaked filter code
 2. HOOK CARD issues: hook text not readable, too much text, text clipped at edges,
    the transition moment (frames right after the hook should be smooth, not a black frame or freeze)
 3. VISUAL issues: black or corrupted frame, severe blur, wrong aspect ratio, repeated/looping visual
@@ -145,41 +124,46 @@ Check for:
 
 Return ONLY a JSON array (can be empty if no issues):
 [
-  {
-    "timestamp_s": 0.5,
-    "severity": "warning",
-    "category": "subtitle",
-    "description": "Subtitle text is very small and barely visible — may need larger font"
-  }
+  {"timestamp_s": 0.5, "severity": "warning", "category": "subtitle",
+   "description": "Subtitle text is very small and barely visible"}
 ]
 
-If everything looks fine, return: []
-"""})
+If everything looks fine, return: []"""
 
-    try:
-        resp = client.messages.create(
-            model="claude-haiku-4-5",   # cheap + fast for QA
-            max_tokens=800,
-            messages=[{"role": "user", "content": content}]
+
+def _analyse_frames(frames: list[tuple[float, Path]]) -> tuple[list[QAIssue], bool]:
+    """
+    Send sampled frames to the verifier (Gemini).
+    Returns (issues, vision_ran). vision_ran=False means the check couldn't run
+    (no key / API error) — so an empty list does NOT mean the video is clean.
+    """
+    from agents.vision import analyse_images_json, vision_available
+
+    if not frames:
+        return [], False
+    if not vision_available():
+        print("  [QA] GEMINI_API_KEY not set — skipping Vision check")
+        return [], False
+
+    paths  = [str(p) for _, p in frames]
+    labels = [f"[Frame at t={t:.1f}s]" for t, _ in frames]
+    data   = analyse_images_json(paths, _QA_PROMPT, labels)
+
+    if data is None:
+        print("  [QA] Vision analysis unavailable (API error) — NOT a clean pass")
+        return [], False
+    if not isinstance(data, list):
+        return [], True
+    issues = [
+        QAIssue(
+            timestamp_s=item.get("timestamp_s", 0),
+            severity=item.get("severity", "warning"),
+            category=item.get("category", "visual"),
+            description=item.get("description", ""),
         )
-        raw = resp.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        data = json.loads(raw.strip())
-        return [
-            QAIssue(
-                timestamp_s=item.get("timestamp_s", 0),
-                severity=item.get("severity", "warning"),
-                category=item.get("category", "visual"),
-                description=item.get("description", ""),
-            )
-            for item in data
-        ]
-    except Exception as e:
-        print(f"  [QA] Vision analysis failed ({e})")
-        return []
+        for item in data if isinstance(item, dict)
+    ]
+    return issues, True
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -193,7 +177,7 @@ def qa_check(
     Run QA on a finished video. Returns a QAReport.
 
     hook_seconds: duration of the hook card prepended to the video (default 2s).
-    use_vision:   if True, sends frames to Claude Vision for content analysis.
+    use_vision:   if True, sends frames to Gemini Vision for content analysis.
                   Set False to skip API cost (frame extraction still runs).
     """
     report = QAReport(video_path=video_path)
@@ -220,10 +204,11 @@ def qa_check(
         report.print_summary()
         return report
 
-    print(f"  [QA] Extracted {len(frames)} frame(s) — sending to Claude Vision…")
+    print(f"  [QA] Extracted {len(frames)} frame(s) — sending to Gemini Vision…")
 
+    vision_ran = False
     if use_vision:
-        issues = _analyse_frames_with_claude(frames)
+        issues, vision_ran = _analyse_frames(frames)
         for issue in issues:
             report.add(issue)
 
@@ -232,7 +217,10 @@ def qa_check(
         f.unlink(missing_ok=True)
     tmp_dir.rmdir()
 
-    report.print_summary()
+    if use_vision and not vision_ran:
+        print("  [QA] ⚠️  Vision did not run — quality NOT verified (not a pass)")
+    else:
+        report.print_summary()
 
     # Write issues to learning log if any warnings/errors found
     if report.issues:
@@ -252,7 +240,7 @@ def _log_qa_issues(video_path: str, issues: list[QAIssue]) -> None:
             entry_type="ANALYTICS",
             title=f"QA issues in {Path(video_path).name}",
             source=f"qa_agent.qa_check() on {Path(video_path).name}",
-            analysis=f"Claude Vision found {len(issues)} issue(s):\n{issue_lines}",
+            analysis=f"Gemini Vision found {len(issues)} issue(s):\n{issue_lines}",
             action_taken="Issues logged. Review and update guidelines if pattern repeats.",
             expected_effect="If same issue appears in 3+ videos, add a rule to director_guidelines.json.",
             conflicts="None.",

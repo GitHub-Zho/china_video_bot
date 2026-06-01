@@ -88,7 +88,8 @@ def _search_pexels_video_candidates(query: str, n: int = 10) -> list[dict]:
             ]
             if hd_files:
                 best = max(hd_files, key=lambda f: f.get("width", 0))
-                out.append({"id": video.get("id"), "url": best["link"]})
+                out.append({"id": video.get("id"), "url": best["link"],
+                            "preview": video.get("image", "")})
             if len(out) >= n:
                 break
     except Exception as e:
@@ -126,7 +127,8 @@ def _search_pixabay_video_candidates(query: str, n: int = 10) -> list[dict]:
             for size in ("large", "medium"):
                 f = files.get(size, {})
                 if f.get("width", 0) >= 1920 and f.get("url"):
-                    out.append({"id": f"px_{hit.get('id')}", "url": f["url"]})
+                    out.append({"id": f"px_{hit.get('id')}", "url": f["url"],
+                                "preview": f.get("thumbnail", "")})
                     break
             if len(out) >= n:
                 break
@@ -170,6 +172,57 @@ def _search_unsplash_photo(query: str) -> str | None:
         return None
 
 
+# ── Vision selection (优中选优) ─────────────────────────────────────────────────
+
+def _pick_best_candidate(candidates: list[dict], query: str) -> dict | None:
+    """
+    Use the verifier (Gemini) to pick the candidate whose PREVIEW best matches
+    the scene query. Downloads only tiny preview thumbnails (cheap), not clips.
+
+    Returns the chosen candidate dict, or None to let the caller fall back to
+    "first unused" ordering (when vision is unavailable or no preview).
+    """
+    import tempfile, shutil
+    from agents.vision import vision_available, analyse_images_json
+
+    if not vision_available():
+        return None
+
+    with_preview = [c for c in candidates if c.get("preview")][:6]
+    if len(with_preview) < 2:
+        return None   # nothing to choose between — caller uses first unused
+
+    prev_dir = Path(tempfile.mkdtemp(prefix="prev_"))
+    try:
+        paths, kept = [], []
+        for i, c in enumerate(with_preview):
+            data = _download_bytes(c["preview"])
+            if data:
+                pth = prev_dir / f"prev_{i}.jpg"
+                pth.write_bytes(data)
+                paths.append(str(pth))
+                kept.append(c)
+        if len(kept) < 2:
+            return None
+
+        labels = [f"[Candidate {i}]" for i in range(len(kept))]
+        prompt = (
+            f"Each image is a candidate stock-video preview for this scene:\n"
+            f'"{query}"\n\n'
+            f"Pick the candidate that best matches the scene — correct location/subject, "
+            f"good composition, clearly China travel footage. Avoid generic/off-topic ones.\n"
+            f'Return ONLY JSON: {{"best": <candidate number>, "why": "<short reason>"}}'
+        )
+        result = analyse_images_json(paths, prompt, labels)
+        if isinstance(result, dict) and isinstance(result.get("best"), int):
+            idx = result["best"]
+            if 0 <= idx < len(kept):
+                return kept[idx]
+        return None
+    finally:
+        shutil.rmtree(prev_dir, ignore_errors=True)
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def download_media(video_id: str, queries: list[str]) -> list[MediaItem]:
@@ -204,12 +257,17 @@ def download_media(video_id: str, queries: list[str]) -> list[MediaItem]:
         print(f"  [Media] {i+1}/{len(target)} '{china_q}'…", end=" ", flush=True)
         time.sleep(API_CALL_DELAY)
 
-        # ── Try 1: video clip — pool Pexels + Pixabay, pick first UNUSED ──
+        # ── Try 1: video clip — pool Pexels + Pixabay, dedup, Vision-pick ──
         candidates = _search_pexels_video_candidates(china_q)
         candidates += _search_pixabay_video_candidates(china_q)
         fresh = [c for c in candidates if c["id"] not in used_video_ids]
-        # Prefer a fresh clip; only reuse if every candidate is already taken
-        pick = fresh[0] if fresh else None
+        # Vision picks the best-matching fresh candidate; falls back to first.
+        pick = None
+        if fresh:
+            best = _pick_best_candidate(fresh, china_q)
+            pick = best if best else fresh[0]
+            if best:
+                print("(vision-picked) ", end="")
         got_clip = False
         if pick:
             data = _download_bytes(pick["url"])
