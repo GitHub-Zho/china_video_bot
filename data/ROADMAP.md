@@ -416,6 +416,6 @@ YouTube数据(3天后) → extract_insights → insights.json
       Gemini 视觉选材&QA 代码✅；阻塞：Gemini key 类型不对需换正式 AIza key。
       优雅降级已验证——无 Gemini 时靠去重仍出好视频）
 - [x] **Phase 3 — 装配拆分 + QA 自动微调** ✅
-- [ ] Phase 4 — CLI + 自主运行 + 话题去重
-- [ ] Phase 5 — 风格参考层
-- [ ] Phase 6 — AUTONOMOUS_GUIDE.md
+- [x] **Phase 4 — CLI + 自主运行 + 话题去重** ✅
+- [x] **Phase 5 — 风格参考层** ✅
+- [x] **Phase 6 — AUTONOMOUS_GUIDE.md** ✅
