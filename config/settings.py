@@ -19,6 +19,7 @@ ANTHROPIC_API_KEY   = os.getenv("ANTHROPIC_API_KEY")
 OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY")
 PEXELS_API_KEY      = os.getenv("PEXELS_API_KEY")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
+PIXABAY_API_KEY     = os.getenv("PIXABAY_API_KEY")
 
 # === Claude model (haiku = cheapest, fast enough for scripts) ===
 CLAUDE_MODEL = "claude-haiku-3-5"

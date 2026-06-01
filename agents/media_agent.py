@@ -14,7 +14,7 @@ import requests
 from dataclasses import dataclass
 from pathlib import Path
 from config.settings import (
-    PEXELS_API_KEY, UNSPLASH_ACCESS_KEY,
+    PEXELS_API_KEY, UNSPLASH_ACCESS_KEY, PIXABAY_API_KEY,
     IMAGES_PER_VIDEO, IMAGE_DOWNLOAD_DELAY, API_CALL_DELAY, OUTPUT_DIR,
 )
 
@@ -96,6 +96,45 @@ def _search_pexels_video_candidates(query: str, n: int = 10) -> list[dict]:
     return out
 
 
+# ── Pixabay Video ───────────────────────────────────────────────────────────────
+
+def _search_pixabay_video_candidates(query: str, n: int = 10) -> list[dict]:
+    """
+    Return up to n candidate HD clips from Pixabay, each as
+    {"id": "px_<id>", "url": best_file_link}.
+
+    Pixabay is a second free source — adds variety and covers gaps where Pexels
+    has little China footage. Video ids are prefixed "px_" so they never collide
+    with Pexels integer ids in the shared dedup set.
+    """
+    out = []
+    if not PIXABAY_API_KEY:
+        return out
+    try:
+        r = _get(
+            "https://pixabay.com/api/videos/",
+            params={"key": PIXABAY_API_KEY, "q": query,
+                    "per_page": 20, "safesearch": "true"},
+        )
+        if not r:
+            return out
+        for hit in r.json().get("hits", []):
+            if hit.get("duration", 0) < 3:
+                continue
+            files = hit.get("videos", {})
+            # Prefer large, fall back to medium; require ≥1920 wide
+            for size in ("large", "medium"):
+                f = files.get(size, {})
+                if f.get("width", 0) >= 1920 and f.get("url"):
+                    out.append({"id": f"px_{hit.get('id')}", "url": f["url"]})
+                    break
+            if len(out) >= n:
+                break
+    except Exception as e:
+        print(f"  [Video] Pixabay search error: {e}")
+    return out
+
+
 # ── Pexels Photo ──────────────────────────────────────────────────────────────
 
 def _search_pexels_photo(query: str) -> str | None:
@@ -165,8 +204,9 @@ def download_media(video_id: str, queries: list[str]) -> list[MediaItem]:
         print(f"  [Media] {i+1}/{len(target)} '{china_q}'…", end=" ", flush=True)
         time.sleep(API_CALL_DELAY)
 
-        # ── Try 1: Pexels video clip — pick first UNUSED candidate ────────
+        # ── Try 1: video clip — pool Pexels + Pixabay, pick first UNUSED ──
         candidates = _search_pexels_video_candidates(china_q)
+        candidates += _search_pixabay_video_candidates(china_q)
         fresh = [c for c in candidates if c["id"] not in used_video_ids]
         # Prefer a fresh clip; only reuse if every candidate is already taken
         pick = fresh[0] if fresh else None
