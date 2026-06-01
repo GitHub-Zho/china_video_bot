@@ -60,33 +60,40 @@ def _download_bytes(url: str) -> bytes | None:
 
 # ── Pexels Video ──────────────────────────────────────────────────────────────
 
-def _search_pexels_video(query: str) -> str | None:
-    """Return direct URL of best HD landscape clip, or None."""
+def _search_pexels_video_candidates(query: str, n: int = 10) -> list[dict]:
+    """
+    Return up to n candidate HD clips for a query, each as
+    {"id": pexels_video_id, "url": best_file_link}.
+
+    Returning MULTIPLE candidates (not just the first) lets the caller skip
+    clips already used by another scene — fixes the repeated-clip problem where
+    similar queries all resolved to the same top Pexels video.
+    """
+    out = []
     try:
         r = _get(
             "https://api.pexels.com/videos/search",
             headers={"Authorization": PEXELS_API_KEY},
             params={"query": query, "orientation": "landscape",
-                    "size": "large", "per_page": 8},
+                    "size": "large", "per_page": 15},
         )
         if not r:
-            return None
-
+            return out
         for video in r.json().get("videos", []):
-            # Collect all HD landscape files
+            if video.get("duration", 0) < 3:
+                continue
             hd_files = [
                 f for f in video.get("video_files", [])
-                if f.get("width", 0) >= 1920
-                and f.get("height", 0) >= 1080
-                and video.get("duration", 0) >= 3
+                if f.get("width", 0) >= 1920 and f.get("height", 0) >= 1080
             ]
             if hd_files:
-                # Pick highest resolution
                 best = max(hd_files, key=lambda f: f.get("width", 0))
-                return best["link"]
+                out.append({"id": video.get("id"), "url": best["link"]})
+            if len(out) >= n:
+                break
     except Exception as e:
         print(f"  [Video] Pexels search error: {e}")
-    return None
+    return out
 
 
 # ── Pexels Photo ──────────────────────────────────────────────────────────────
@@ -137,6 +144,7 @@ def download_media(video_id: str, queries: list[str]) -> list[MediaItem]:
 
     items: list[MediaItem] = []
     target = queries[:IMAGES_PER_VIDEO]
+    used_video_ids: set = set()   # dedup: never use the same Pexels clip twice
 
     for i, query in enumerate(target):
         china_q = f"China {query}" if "china" not in query.lower() else query
@@ -157,16 +165,24 @@ def download_media(video_id: str, queries: list[str]) -> list[MediaItem]:
         print(f"  [Media] {i+1}/{len(target)} '{china_q}'…", end=" ", flush=True)
         time.sleep(API_CALL_DELAY)
 
-        # ── Try 1: Pexels video clip ──────────────────────────────────────
-        clip_url = _search_pexels_video(china_q)
-        if clip_url:
-            data = _download_bytes(clip_url)
+        # ── Try 1: Pexels video clip — pick first UNUSED candidate ────────
+        candidates = _search_pexels_video_candidates(china_q)
+        fresh = [c for c in candidates if c["id"] not in used_video_ids]
+        # Prefer a fresh clip; only reuse if every candidate is already taken
+        pick = fresh[0] if fresh else None
+        got_clip = False
+        if pick:
+            data = _download_bytes(pick["url"])
             if data and len(data) > 50_000:
                 clip_path.write_bytes(data)
-                print(f"clip ✓ ({len(data)//1024}KB)")
+                used_video_ids.add(pick["id"])
+                reused = " (search had only used clips)" if not fresh else ""
+                print(f"clip ✓ ({len(data)//1024}KB){reused}")
                 items.append(MediaItem(str(clip_path), "clip"))
+                got_clip = True
                 time.sleep(IMAGE_DOWNLOAD_DELAY)
-                continue
+        if got_clip:
+            continue
 
         # ── Try 2: Pexels photo ───────────────────────────────────────────
         time.sleep(API_CALL_DELAY)
