@@ -1,7 +1,7 @@
 {
-  "version": 2,
-  "updated": "2026-05-30",
-  "updated_reason": "User feedback after first two generated videos: content not engaging, visuals poor quality, subtitles missing",
+  "version": 3,
+  "updated": "2026-06-01",
+  "updated_reason": "Added platform technical standards + QA rules as permanent guidelines",
 
   "do": [
     "Include at least one specific numerical fact per video (years old, km/h, metres tall, cost in USD)",
@@ -11,7 +11,9 @@
     "Each narration must create curiosity for the NEXT scene — end lines slightly open, not conclusive",
     "Every 3 scenes, introduce a contrast or unexpected twist (cheap vs expensive, ancient vs modern, crowded vs empty)",
     "Visual queries must include: location + time of day + lighting condition + ONE emotional detail (e.g. 'mist rising', 'golden light', 'empty streets')",
-    "Visual queries must be cinematic and specific — imagine describing a shot to a film director, not a search engine"
+    "Visual queries must be cinematic and specific — imagine describing a shot to a film director, not a search engine",
+    "Keep each narration to 6-10 words — short-form Reels pace, not documentary narration",
+    "Target video length: ~32 seconds total (8 scenes × 4s) — every second must earn its place"
   ],
 
   "avoid": [
@@ -22,7 +24,7 @@
     "Ending sentences with 'always', 'every time', 'completely' — unnatural filler words",
     "Repeating the same location across multiple scenes — each scene must be a different place",
     "Visual queries that are just city names — 'China Shanghai skyline' tells a stock footage site nothing useful",
-    "CTA lines that say 'discover the secrets' — too generic, replace with something specific like 'Follow for more places like this'"
+    "CTA lines that say 'discover the secrets' — replace with something specific like 'More places like this. Follow us.'"
   ],
 
   "style_notes": [
@@ -31,6 +33,19 @@
     "Contrast works best: ancient vs modern, cheap vs expected luxury, hidden vs famous",
     "The CTA (last scene) should feel like a cliffhanger — hint at something you haven't shown yet"
   ],
+
+  "platform_standards": {
+    "_note": "These are technical rules baked into the code. Listed here so the Director understands the constraints it is working within.",
+    "hook_card_duration_s": 2.0,
+    "hook_card_rule": "First 2 seconds = freeze frame with large hook text overlay (bold, box background). Must be readable at a glance.",
+    "subtitle_sizing": "Font size = 3.2% of video height. ~34px for YouTube 1080p, ~61px for Instagram Reels 1920px.",
+    "subtitle_position": "Bottom 18% of frame (y=82%). Clears Instagram UI chrome at bottom. Never goes lower.",
+    "subtitle_max_duration_s": 3.5,
+    "subtitle_rule": "Each cue shows for max 3.5s. No lingering. Text clears between thoughts.",
+    "video_formats": "YouTube 1920x1080 (16:9) AND Reels 1080x1920 (9:16) — both generated from same source",
+    "tts_voice": "Kokoro af_heart at 1.05x speed. Fallback to edge-tts AriaNeural.",
+    "qa_check": "After every video: Claude Vision reviews 8-10 sampled frames for subtitle issues, hook readability, visual quality."
+  },
 
   "visual_query_rules": [
     "Always prefix with 'China' then the specific region/city",
@@ -41,10 +56,10 @@
   ],
 
   "example_good_narrations": [
-    "What if I told you this 1,200-year-old town costs less than ten dollars a night?",
-    "The bullet train from Beijing to Shanghai takes four hours — same as flying, but you see the country.",
-    "Locals here eat breakfast standing up in an alley that hasn't changed since the Tang dynasty.",
-    "This is China's answer to the Amalfi Coast — except almost nobody outside China knows it exists."
+    "What if I told you this 1,200-year-old town costs under ten dollars a night?",
+    "Three dollars gets you breakfast in this alley.",
+    "Locals eat standing up in streets unchanged since the Tang dynasty.",
+    "This is China's answer to the Amalfi Coast — almost nobody knows it."
   ],
 
   "example_bad_narrations": [

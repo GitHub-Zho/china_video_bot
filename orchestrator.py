@@ -14,7 +14,8 @@ from agents.voice_agent      import generate_voice
 from agents.video_agent      import assemble_video
 from agents.publisher_agent  import upload_video
 from agents.analytics_agent  import run_pending_analytics, extract_insights
-from config.settings         import OUTPUT_DIR, FFPROBE_BIN
+from agents.qa_agent         import qa_check
+from config.settings         import OUTPUT_DIR, FFPROBE_BIN, HOOK_CARD_SECONDS
 
 
 def _video_id() -> str:
@@ -131,12 +132,12 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False) -> str:
     video_paths = assemble_video(vid, media_items, audio_path, srt_path,
                                   hook_text=brief.hook)
 
-    # Quality check
+    # ── Quality check (technical + Claude Vision frame analysis) ─
     print("\n  [QC] Running post-generation checks…")
     yt_path = video_paths.get("youtube", "")
-    qc_pass = _quality_check(yt_path, audio_path) if yt_path else False
-    if not qc_pass:
-        print("  [QC] ⚠️  Quality check flagged issues — review output before uploading")
+    if yt_path:
+        _quality_check(yt_path, audio_path)
+        qa_check(yt_path, hook_seconds=HOOK_CARD_SECONDS)
 
     if dry_run:
         print(f"\n✅ DRY RUN — videos saved locally (not uploaded):")
@@ -214,12 +215,12 @@ def run_pipeline_from_folder(
     video_paths = assemble_video(vid, media_items, audio_path, srt_path,
                                   hook_text=brief.hook)
 
-    # Quality check
+    # ── Quality check ─────────────────────────────────────────
     print("\n  [QC] Running post-generation checks…")
     yt_path = video_paths.get("youtube", "")
-    qc_pass = _quality_check(yt_path, audio_path) if yt_path else False
-    if not qc_pass:
-        print("  [QC] ⚠️  Quality check flagged issues — review output before uploading")
+    if yt_path:
+        _quality_check(yt_path, audio_path)
+        qa_check(yt_path, hook_seconds=HOOK_CARD_SECONDS)
 
     if dry_run:
         print(f"\n✅ DRY RUN — videos saved locally:")

@@ -144,11 +144,12 @@ def _shift_srt(srt_path: str, offset_ms: int) -> str:
 
 def _burn_subtitles(raw_path: str, audio_path: str,
                     srt_path: str, out_path: str,
-                    subtitle_offset_ms: int = 0) -> None:
+                    subtitle_offset_ms: int = 0,
+                    video_w: int = 1920, video_h: int = 1080) -> None:
     """Attach audio + burn subtitles: raw video → final MP4.
 
-    subtitle_offset_ms: shift all subtitle timestamps forward by this amount
-                        (used when a hook card is prepended to the video).
+    subtitle_offset_ms: shift timestamps forward (hook card prepended).
+    video_w / video_h:  actual output dimensions — subtitle size scales with these.
     """
     mode = _subtitle_mode()
 
@@ -160,18 +161,23 @@ def _burn_subtitles(raw_path: str, audio_path: str,
     if mode == "copy":
         vf_args = []
     elif mode == "libass":
-        safe_srt = active_srt.replace("\\", "/").replace(":", "\\:")
-        vf_args = [
+        # FontSize in ASS/libass is in "script resolution" units (not pixels).
+        # Approximate: FontSize ≈ 3.2% of video height gives good proportions.
+        font_size = max(20, int(video_h * 0.032))
+        # MarginV: keep text above platform UI (bottom 15% for Instagram/YouTube Shorts)
+        margin_v  = int(video_h * 0.12)
+        safe_srt  = active_srt.replace("\\", "/").replace(":", "\\:")
+        vf_args   = [
             "-vf",
             f"subtitles={safe_srt}:"
-            f"force_style='FontName=Arial Bold,FontSize=32,Bold=1,"
+            f"force_style='FontName=Arial Bold,FontSize={font_size},Bold=1,"
             f"PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
             f"BackColour=&H80000000,"
             f"Outline=2,Shadow=1,BorderStyle=4,"
-            f"Alignment=2,MarginV=60'"
+            f"Alignment=2,MarginV={margin_v}'"
         ]
     else:
-        vf_args = ["-vf", _drawtext_filter(active_srt)]
+        vf_args = ["-vf", _drawtext_filter(active_srt, video_w, video_h)]
 
     cmd = [
         FFMPEG_BIN, "-y",
@@ -191,13 +197,25 @@ def _burn_subtitles(raw_path: str, audio_path: str,
         raise RuntimeError(f"FFmpeg final encode failed:\n{r.stderr[-1500:]}")
 
 
-def _drawtext_filter(srt_path: str) -> str:
+def _drawtext_filter(srt_path: str, video_w: int = 1920, video_h: int = 1080) -> str:
     """
     Build a drawtext filter chain — one per SRT cue, time-gated with enable='between(t,…)'.
-    Robust against commas, apostrophes, and other special characters in subtitle text.
-    No sendcmd, no temp files — just a long but valid FFmpeg filter string.
+
+    Subtitle sizing rules (platform-aware):
+    - Font size: ~3.2% of video height  → 34px YouTube(1080h) / 61px Reels(1920h)
+    - Y position: 82% down — clears platform UI chrome at bottom (Instagram/YouTube Shorts)
+    - Max cue duration: 3.5s — prevents any single subtitle from lingering on screen
+    - Border width: scales slightly with video height
     """
     import re, platform
+
+    # ── Proportional sizing ────────────────────────────────────────────────────
+    fontsize   = max(24, int(video_h * 0.032))      # scales with height
+    borderw    = max(2,  int(video_h * 0.003))       # ~3px@1080, ~5px@1920
+    # Y: 82% down = safe zone for both Instagram Reels and YouTube Shorts UI
+    y_pos      = f"h*0.82"
+    MAX_CUE_DUR = 3.5   # seconds — cap any subtitle that lingers too long
+
     # ── Font selection ─────────────────────────────────────────────────────────
     if platform.system() == "Darwin":
         font_candidates = [
@@ -212,7 +230,6 @@ def _drawtext_filter(srt_path: str) -> str:
             "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
         ]
     font_path = next((f for f in font_candidates if Path(f).exists()), "")
-    # In FFmpeg filter strings, ':' inside a value must be escaped as '\:'
     font_arg  = f"fontfile={font_path.replace(':', chr(92)+':')}:" if font_path else ""
 
     srt    = Path(srt_path).read_text(encoding="utf-8")
@@ -232,14 +249,12 @@ def _drawtext_filter(srt_path: str) -> str:
         h1,m1,s1,ms1,h2,m2,s2,ms2 = map(int, ts.groups())
         t0 = h1*3600+m1*60+s1+ms1/1000
         t1 = h2*3600+m2*60+s2+ms2/1000
-        txt = " ".join(bl[2:])
 
-        # FFmpeg escaping for unquoted option values (subprocess, no shell involved):
-        #   \  →  \\   (escape first — avoids double-escaping)
-        #   '  →  \'   (apostrophe — must NOT be inside single-quoted context)
-        #   :  →  \:   (option separator)
-        #   ,  →  \,   (filter-chain separator)
-        # Wrap the enable expression in single quotes so its commas are safe.
+        # Cap cue duration — prevents subtitle from lingering on screen
+        if t1 - t0 > MAX_CUE_DUR:
+            t1 = t0 + MAX_CUE_DUR
+
+        txt = " ".join(bl[2:])
         txt_esc = (txt
                    .replace("\\", "\\\\")
                    .replace("'",  "\\'")
@@ -248,8 +263,9 @@ def _drawtext_filter(srt_path: str) -> str:
 
         parts.append(
             f"drawtext={font_arg}"
-            f"fontsize=32:fontcolor=white:borderw=3:bordercolor=black@0.9:"
-            f"x=(w-tw)/2:y=h*0.88:"
+            f"fontsize={fontsize}:fontcolor=white:borderw={borderw}:bordercolor=black@0.9:"
+            f"box=1:boxcolor=black@0.35:boxborderw=8:"
+            f"x=(w-tw)/2:y={y_pos}:"
             f"text={txt_esc}:"
             f"enable='between(t,{t0:.3f},{t1:.3f})'"
         )
@@ -321,10 +337,15 @@ def _make_hook_card(hook_text: str, first_clip: str,
 
     vf_filter = ",".join(dt_with_box)
 
+    # Fade out last 0.4s so the cut to first scene is smooth, not jarring
+    fade_start = max(0, duration - 0.4)
+    fade_filter = f"fade=t=out:st={fade_start:.2f}:d=0.4"
+
     cmd = [
         FFMPEG_BIN, "-y",
         "-i", first_clip,
-        "-vf", f"trim=0:{HOOK_CARD_SECONDS},setpts=PTS-STARTPTS,{vf_filter}",
+        "-vf", (f"trim=0:{HOOK_CARD_SECONDS},setpts=PTS-STARTPTS,"
+                f"{vf_filter},{fade_filter}"),
         "-t", str(duration),
         "-r", str(FPS),
         "-c:v", "libx264", "-crf", "18", "-preset", "fast",
@@ -442,7 +463,8 @@ def assemble_video(video_id: str, media_items, audio_path: str,
 
             # ── Step 4: audio + subtitles → final ────────────────────
             _burn_subtitles(raw_mp4, audio_path, srt_path, out_path,
-                            subtitle_offset_ms=int(hook_dur * 1000))
+                            subtitle_offset_ms=int(hook_dur * 1000),
+                            video_w=w, video_h=h)
 
         finally:
             # Clean up temp segments
