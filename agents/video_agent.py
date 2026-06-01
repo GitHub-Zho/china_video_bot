@@ -23,6 +23,24 @@ from config.settings import (
 )
 
 
+# ── Bundled caption font ───────────────────────────────────────────────────────
+# Anton — the classic bold condensed font used in most Reels/Shorts captions.
+# Bundled in assets/fonts so the look is identical on Mac and on the server.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+def _caption_font() -> str:
+    """Return path to the bundled Anton font, or '' to let FFmpeg pick a default."""
+    anton = _PROJECT_ROOT / "assets" / "fonts" / "Anton-Regular.ttf"
+    if anton.exists():
+        return str(anton)
+    # Fall back to a system bold font
+    import platform
+    sys_fonts = (["/System/Library/Fonts/Helvetica.ttc"]
+                 if platform.system() == "Darwin"
+                 else ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"])
+    return next((f for f in sys_fonts if Path(f).exists()), "")
+
+
 # ── Subtitle capability ────────────────────────────────────────────────────────
 
 _SUBTITLE_MODE: str | None = None   # cached on first call; reset by restarting Python
@@ -233,25 +251,12 @@ def _drawtext_filter(srt_path: str, tmp_dir: Path,
     borderw  = max(2,  int(video_h * 0.0035))
     y_pos    = f"h*{subtitle_y}"
 
-    # Wrap width: keep text inside the frame. Narrow Reels wraps more aggressively.
-    # All-caps bold glyphs are wide (~0.62× font); 0.82 safety margin on frame width.
-    char_w     = 0.62 * fontsize
-    max_chars  = max(10, int((video_w * 0.82) / char_w))
+    # Wrap width: keep text inside the frame. Anton is condensed (~0.46× font wide).
+    char_w     = 0.46 * fontsize
+    max_chars  = max(12, int((video_w * 0.84) / char_w))
 
-    # ── Font selection ─────────────────────────────────────────────────────────
-    if platform.system() == "Darwin":
-        font_candidates = [
-            "/System/Library/Fonts/Helvetica.ttc",
-            "/System/Library/Fonts/Arial.ttf",
-            "/Library/Fonts/Arial.ttf",
-        ]
-    else:
-        font_candidates = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-        ]
-    font_path = next((f for f in font_candidates if Path(f).exists()), "")
+    # ── Font: bundled Anton (Reels caption style) ──────────────────────────────
+    font_path = _caption_font()
     font_arg  = f"fontfile={font_path.replace(':', chr(92)+':')}:" if font_path else ""
 
     srt    = Path(srt_path).read_text(encoding="utf-8")
@@ -319,22 +324,16 @@ def _make_hook_card(hook_text: str, first_clip: str,
 
     hook_text: the Director's hook line (1 sentence)
     """
-    import platform, textwrap
+    import textwrap
 
-    # Font for hook card — larger & bolder than subtitle font
-    if platform.system() == "Darwin":
-        font_candidates = ["/System/Library/Fonts/Helvetica.ttc",
-                           "/Library/Fonts/Arial.ttf"]
-    else:
-        font_candidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                           "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"]
-    font_path = next((f for f in font_candidates if Path(f).exists()), "")
+    # Hook uses the same bundled Anton font as subtitles (consistent brand look)
+    font_path = _caption_font()
     font_arg  = f"fontfile={font_path.replace(':', chr(92)+':')}:" if font_path else ""
 
     # Font size based on WIDTH (not height) so vertical Reels don't get giant text.
     # Wrap width computed from actual frame width + font size so text never clips.
-    line_h     = int(w * 0.052)              # YouTube ~100px, Reels ~56px
-    char_w     = 0.52 * line_h               # approx bold glyph width
+    line_h     = int(w * 0.058)              # Anton condensed → can go a bit bigger
+    char_w     = 0.46 * line_h               # Anton glyph width (condensed)
     max_chars  = max(10, int((w * 0.86) / char_w))
     lines      = textwrap.wrap(hook_text, width=max_chars)
     line_gap   = int(line_h * 1.25)

@@ -33,6 +33,15 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 CRITIC_PASS_SCORE = 7
 MAX_RETRIES = 2
 
+# Narration length targets (words). Subtitles wrap to ~2 lines at 6-12 words.
+MIN_NARRATION_WORDS = 6
+MAX_NARRATION_WORDS = 12
+
+
+class BriefValidationError(Exception):
+    """Soft failure — brief content didn't meet rules. Triggers a retry with
+    feedback, NOT a template fallback (which would lose the user's prompt)."""
+
 
 # ── Data classes ──────────────────────────────────────────────────────────────
 
@@ -223,7 +232,8 @@ Return ONLY JSON:
 
 # ── Fallback templates ────────────────────────────────────────────────────────
 
-def _fallback_brief(audience_type: str | None, target_seconds: float) -> CreativeBrief:
+def _fallback_brief(audience_type: str | None, target_seconds: float,
+                    prompt: str = "") -> CreativeBrief:
     n_scenes    = math.ceil(target_seconds / SLIDE_DURATION)
     secs_per    = target_seconds / n_scenes
 
@@ -235,32 +245,32 @@ def _fallback_brief(audience_type: str | None, target_seconds: float) -> Creativ
             "topic": "Hidden wonders of China",
             "audience_type": "explorer",
             "mood": "cinematic",
-            "hook": "Most tourists never see this part of China — and that is a shame.",
-            "cta": "Follow for more hidden China adventures.",
+            "hook": "Most tourists never see this side of China.",
+            "cta": "Follow for more hidden China.",
             "raw_scenes": [
-                ("Most tourists never see this part of China — and that is a shame.",
+                ("Most tourists never see this side of China.",
                  "aerial China Zhangjiajie sandstone pillars dawn golden mist swirling", "dramatic"),
-                ("Fenghuang Ancient Town is two thousand years old and still fully lived-in.",
+                ("Fenghuang Town is two thousand years old.",
                  "China Fenghuang ancient town wooden stilt houses river reflection sunrise warm", "warm"),
-                ("The rice terraces of Yunnan glow gold every October — almost no one goes.",
+                ("Yunnan's rice terraces glow gold every October.",
                  "China Yuanyang Hani rice terraces golden sunset aerial panoramic harvest", "cinematic"),
-                ("Guilin's Li River looks exactly like a Song dynasty ink painting — but real.",
+                ("Guilin's Li River looks like an ink painting.",
                  "China Li River Guilin cormorant fisherman karst peaks morning mist boat", "serene"),
-                ("In Chengdu you can watch giant pandas eat bamboo for about five dollars.",
+                ("Watch pandas eat bamboo for five dollars.",
                  "China Chengdu giant panda research base bamboo close up morning light", "warm"),
-                ("Zhangye Danxia — rainbow mountains that took twenty million years to form.",
+                ("Rainbow mountains, twenty million years in the making.",
                  "China Zhangye Danxia colourful rainbow mountains aerial wide shot golden hour", "dramatic"),
-                ("Shanghai's Bund at midnight looks like a science fiction film set — for free.",
+                ("Shanghai's Bund at midnight looks like sci-fi.",
                  "China Shanghai Bund skyline night reflections Pudong neon lights river", "energetic"),
-                ("A full meal at a local night market in Chengdu costs under three dollars.",
+                ("A whole night-market meal costs three dollars.",
                  "China Chengdu night market street food stalls bustling vendors lanterns evening", "energetic"),
-                ("Wuzhen water town has no cars — just canals, stone bridges, and silence.",
+                ("Wuzhen water town has no cars, only canals.",
                  "China Wuzhen water town canals stone bridges reflection lanterns dusk serene", "serene"),
-                ("The Huangshan mountains are so dramatic the Chinese say they are a painting.",
+                ("Huangshan's peaks float above a sea of clouds.",
                  "aerial China Huangshan yellow mountain pine trees sea of clouds sunrise fog", "cinematic"),
-                ("Xi'an has an ancient wall you can cycle around on top — all 14 kilometres.",
+                ("Cycle Xi'an's ancient wall, all fourteen kilometres.",
                  "China Xian ancient city wall cycling sunset golden light panoramic dusk", "energetic"),
-                ("Follow for more hidden China adventures.",
+                ("Follow for more hidden corners of China.",
                  "China misty mountain temple sunrise peaceful monks walking stone path", "cinematic"),
             ]
         },
@@ -271,30 +281,30 @@ def _fallback_brief(audience_type: str | None, target_seconds: float) -> Creativ
             "topic": "First-time visitor guide to China",
             "audience_type": "newcomer",
             "mood": "energetic",
-            "hook": "China is nothing like what you were told — here is what to actually expect.",
+            "hook": "China is nothing like what you were told.",
             "cta": "Save this before your China trip.",
             "raw_scenes": [
-                ("China is nothing like what you were told — here is what to actually expect.",
+                ("China is nothing like what you were told.",
                  "China modern city Shanghai high rise buildings blue sky futuristic skyline", "energetic"),
-                ("The high-speed trains hit 350 kilometres per hour — same trip time as flying.",
+                ("Bullet trains hit 350 kilometres per hour.",
                  "China Fuxing high speed train station interior sleek modern platform departure", "energetic"),
-                ("Breakfast at a local street stall costs less than one US dollar.",
+                ("Street breakfast costs less than one dollar.",
                  "China street food vendor steaming dumplings baozi morning local market alley", "warm"),
-                ("Most cities are cleaner than you imagined — streets swept before sunrise daily.",
+                ("Cities are cleaner than you ever imagined.",
                  "China clean modern street pedestrian area Beijing hutong renovated morning light", "serene"),
-                ("Google does not work, but Baidu Maps and WeChat handle absolutely everything.",
+                ("Google fails here, but WeChat handles everything.",
                  "China smartphone navigation WeChat app street map local landmark city walking", "cinematic"),
-                ("The food is nothing like takeout — every province tastes completely different.",
+                ("Every province's food tastes completely different.",
                  "China Sichuan hotpot restaurant interior steaming broth spicy colourful evening", "warm"),
-                ("Strangers will offer to help you navigate — often walking you to your destination.",
+                ("Strangers will walk you to your destination.",
                  "China local family smiling welcoming tea ceremony traditional courtyard afternoon", "warm"),
-                ("The landscapes are so dramatic they look like film sets — but they are real.",
+                ("The landscapes look like film sets, but real.",
                  "aerial China Huangshan mountains pine trees sea of clouds dramatic sunrise", "cinematic"),
-                ("A one-way bullet train ticket from Beijing to Shanghai costs around fifty dollars.",
+                ("Beijing to Shanghai by train: fifty dollars.",
                  "China Beijing South station high speed rail platform boarding morning rush", "energetic"),
-                ("Mobile payment works everywhere — you can go cashless on day one.",
+                ("Pay everywhere by phone, go cashless instantly.",
                  "China WeChat Pay Alipay QR code street vendor payment seamless modern", "energetic"),
-                ("Most tourist areas have English signs and English-speaking staff since 2010.",
+                ("Tourist areas have English signs everywhere now.",
                  "China tourist area English signage international visitors city landmark daytime", "serene"),
                 ("Save this before your China trip.",
                  "China travel montage diverse landscapes city food culture fast cut vibrant", "energetic"),
@@ -304,6 +314,9 @@ def _fallback_brief(audience_type: str | None, target_seconds: float) -> Creativ
 
     candidates = [t for t in templates if t["audience_type"] == (audience_type or "explorer")]
     tmpl = random.choice(candidates) if candidates else random.choice(templates)
+    if prompt:
+        print(f"  [Director] ⚠️  Template fallback can't honor prompt '{prompt[:40]}' "
+              f"— using generic '{tmpl['topic']}'")
 
     # Scale scenes to hit target_seconds
     raw = tmpl["raw_scenes"]
@@ -396,18 +409,20 @@ def _generate_brief_via_groq(
     if not raw_scenes:
         raise ValueError("Groq returned no scenes in the brief")
 
-    # Validate word counts — scenes need ≥5 words (short-form style, 6-10 target)
-    last_idx = len(raw_scenes) - 1
-    short_scenes = [
-        (i, s.get("narration", ""))
-        for i, s in enumerate(raw_scenes)
-        if len(s.get("narration", "").split()) < 5
-    ]
-    if short_scenes:
-        examples = "; ".join(f'Scene {i}: "{n}"' for i, n in short_scenes[:3])
-        raise ValueError(
-            f"Narrations too short (<5 words) in scenes: {examples}. "
-            f"Target 6-10 words per scene."
+    # Validate word counts — flag both too-short and too-long narrations.
+    # Too short → flashes by; too long → wraps to 4-5 lines (covers the frame).
+    bad = []
+    for i, s in enumerate(raw_scenes):
+        wc = len(s.get("narration", "").split())
+        if wc < MIN_NARRATION_WORDS:
+            bad.append((i, s.get("narration", ""), f"{wc}w too short"))
+        elif wc > MAX_NARRATION_WORDS:
+            bad.append((i, s.get("narration", ""), f"{wc}w too long"))
+    if bad:
+        examples = "; ".join(f'Scene {i} ({why}): "{n}"' for i, n, why in bad[:3])
+        raise BriefValidationError(
+            f"Narrations must be {MIN_NARRATION_WORDS}-{MAX_NARRATION_WORDS} words. "
+            f"Problems: {examples}. Rewrite ALL narrations to this length."
         )
 
     scenes = [
@@ -493,6 +508,7 @@ def create_brief(
     guidelines = _load_guidelines()   # human-curated rules, updated by Claude
     feedback   = ""
 
+    brief = None
     for attempt in range(MAX_RETRIES + 1):
         label = "Calling Groq" if attempt == 0 else f"Retry {attempt}/{MAX_RETRIES}"
         print(f"  [Director] {label} (target={target_seconds:.0f}s, "
@@ -501,9 +517,15 @@ def create_brief(
             brief = _generate_brief_via_groq(
                 audience_type, target_seconds, feedback, insights, guidelines, prompt
             )
+        except BriefValidationError as e:
+            # Soft failure — retry with the validation message as feedback.
+            # Does NOT fall back to template (which would lose the prompt).
+            print(f"  [Director] ✗ Validation: {e}")
+            feedback = str(e)
+            continue
         except Exception as e:
             print(f"  [Director] Groq unavailable ({e}), using template")
-            return _fallback_brief(audience_type, target_seconds)
+            return _fallback_brief(audience_type, target_seconds, prompt)
 
         score, feedback = _critique_brief(brief)
         if score >= CRITIC_PASS_SCORE:
@@ -511,6 +533,9 @@ def create_brief(
                   f"({len(brief.scenes)} scenes)")
             return brief
 
-    # Exhausted retries — use last generated brief anyway
-    print(f"  [Director] ⚠️  Max retries — using last attempt")
-    return brief
+    # Exhausted retries — use last valid brief, or template if none passed validation
+    if brief is not None:
+        print(f"  [Director] ⚠️  Max retries — using last attempt")
+        return brief
+    print(f"  [Director] ⚠️  No valid brief — using template")
+    return _fallback_brief(audience_type, target_seconds, prompt)
