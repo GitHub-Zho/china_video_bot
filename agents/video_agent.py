@@ -177,7 +177,8 @@ def _burn_subtitles(raw_path: str, audio_path: str,
             f"Alignment=2,MarginV={margin_v}'"
         ]
     else:
-        vf_args = ["-vf", _drawtext_filter(active_srt, video_w, video_h)]
+        cue_dir = Path(tempfile.mkdtemp(prefix="cues_"))
+        vf_args = ["-vf", _drawtext_filter(active_srt, cue_dir, video_w, video_h)]
 
     cmd = [
         FFMPEG_BIN, "-y",
@@ -197,24 +198,32 @@ def _burn_subtitles(raw_path: str, audio_path: str,
         raise RuntimeError(f"FFmpeg final encode failed:\n{r.stderr[-1500:]}")
 
 
-def _drawtext_filter(srt_path: str, video_w: int = 1920, video_h: int = 1080) -> str:
+def _drawtext_filter(srt_path: str, tmp_dir: Path,
+                     video_w: int = 1920, video_h: int = 1080,
+                     fontsize_pct: float = 0.040,
+                     subtitle_y: float = 0.80,
+                     max_cue_dur: float = 3.5) -> str:
     """
     Build a drawtext filter chain — one per SRT cue, time-gated with enable='between(t,…)'.
 
-    Subtitle sizing rules (platform-aware):
-    - Font size: ~3.2% of video height  → 34px YouTube(1080h) / 61px Reels(1920h)
-    - Y position: 82% down — clears platform UI chrome at bottom (Instagram/YouTube Shorts)
-    - Max cue duration: 3.5s — prevents any single subtitle from lingering on screen
-    - Border width: scales slightly with video height
+    Uses textfile= (not text=) so subtitle content is read from a file. This
+    completely avoids FFmpeg's inline-text escaping problems (colons, commas,
+    apostrophes leaking the enable= expression into the visible text).
+
+    Sizing is proportional to video height; Reels (taller) → bigger px font.
+    tmp_dir: where per-cue text files are written (caller cleans up).
     """
-    import re, platform
+    import re, platform, textwrap
 
     # ── Proportional sizing ────────────────────────────────────────────────────
-    fontsize   = max(24, int(video_h * 0.032))      # scales with height
-    borderw    = max(2,  int(video_h * 0.003))       # ~3px@1080, ~5px@1920
-    # Y: 82% down = safe zone for both Instagram Reels and YouTube Shorts UI
-    y_pos      = f"h*0.82"
-    MAX_CUE_DUR = 3.5   # seconds — cap any subtitle that lingers too long
+    fontsize = max(28, int(video_h * fontsize_pct))   # ~49px YouTube / 86px Reels
+    borderw  = max(2,  int(video_h * 0.0035))
+    y_pos    = f"h*{subtitle_y}"
+
+    # Wrap width: keep text inside the frame. Narrow Reels wraps more aggressively.
+    # All-caps bold glyphs are wide (~0.62× font); 0.82 safety margin on frame width.
+    char_w     = 0.62 * fontsize
+    max_chars  = max(10, int((video_w * 0.82) / char_w))
 
     # ── Font selection ─────────────────────────────────────────────────────────
     if platform.system() == "Darwin":
@@ -235,6 +244,7 @@ def _drawtext_filter(srt_path: str, video_w: int = 1920, video_h: int = 1080) ->
     srt    = Path(srt_path).read_text(encoding="utf-8")
     blocks = re.split(r"\n\n+", srt.strip())
     parts  = []
+    cue_n  = 0
 
     for block in blocks:
         bl = block.strip().splitlines()
@@ -251,22 +261,28 @@ def _drawtext_filter(srt_path: str, video_w: int = 1920, video_h: int = 1080) ->
         t1 = h2*3600+m2*60+s2+ms2/1000
 
         # Cap cue duration — prevents subtitle from lingering on screen
-        if t1 - t0 > MAX_CUE_DUR:
-            t1 = t0 + MAX_CUE_DUR
+        if t1 - t0 > max_cue_dur:
+            t1 = t0 + max_cue_dur
 
-        txt = " ".join(bl[2:])
-        txt_esc = (txt
-                   .replace("\\", "\\\\")
-                   .replace("'",  "\\'")
-                   .replace(":",  "\\:")
-                   .replace(",",  "\\,"))
+        txt = " ".join(bl[2:]).strip()
+        if not txt:
+            continue
+
+        # Wrap to frame width so text never clips horizontally (esp. narrow Reels)
+        wrapped = "\n".join(textwrap.wrap(txt, width=max_chars)) or txt
+
+        # Write cue text to a file → textfile= reads it literally (no escaping hell)
+        cue_file = tmp_dir / f"cue_{cue_n:03d}.txt"
+        cue_file.write_text(wrapped, encoding="utf-8")
+        tf_path = str(cue_file).replace(":", "\\:")
+        cue_n += 1
 
         parts.append(
             f"drawtext={font_arg}"
             f"fontsize={fontsize}:fontcolor=white:borderw={borderw}:bordercolor=black@0.9:"
-            f"box=1:boxcolor=black@0.35:boxborderw=8:"
+            f"box=1:boxcolor=black@0.45:boxborderw=10:"
             f"x=(w-tw)/2:y={y_pos}:"
-            f"text={txt_esc}:"
+            f"textfile={tf_path}:"
             f"enable='between(t,{t0:.3f},{t1:.3f})'"
         )
 
@@ -297,42 +313,30 @@ def _make_hook_card(hook_text: str, first_clip: str,
     font_path = next((f for f in font_candidates if Path(f).exists()), "")
     font_arg  = f"fontfile={font_path.replace(':', chr(92)+':')}:" if font_path else ""
 
-    # Wrap long text — max 30 chars per line for hook card
-    lines      = textwrap.wrap(hook_text, width=30)
-    line_h     = int(h * 0.075)          # font size ≈ 7.5% of frame height
-    total_h    = len(lines) * line_h
-    start_y    = (h - total_h) // 2      # vertically centred
+    # Font size based on WIDTH (not height) so vertical Reels don't get giant text.
+    # Wrap width computed from actual frame width + font size so text never clips.
+    line_h     = int(w * 0.052)              # YouTube ~100px, Reels ~56px
+    char_w     = 0.52 * line_h               # approx bold glyph width
+    max_chars  = max(10, int((w * 0.86) / char_w))
+    lines      = textwrap.wrap(hook_text, width=max_chars)
+    line_gap   = int(line_h * 1.25)
+    total_h    = len(lines) * line_gap
+    start_y    = (h - total_h) // 2          # vertically centred
 
-    # Build one drawtext filter per line
-    dt_parts = []
-    for i, line in enumerate(lines):
-        esc = (line.replace("\\", "\\\\")
-                   .replace("'",  "\\'")
-                   .replace(":",  "\\:")
-                   .replace(",",  "\\,"))
-        y = start_y + i * line_h
-        dt_parts.append(
-            f"drawtext={font_arg}"
-            f"fontsize={line_h}:fontcolor=white:borderw=4:bordercolor=black@0.95:"
-            f"x=(w-tw)/2:y={y}:"
-            f"text={esc}"
-        )
-
-    # Semi-transparent dark overlay behind text  (box behind text)
-    # We use drawtext box option directly
+    # Write each line to a textfile (robust — no escaping leak like text= had)
+    cue_dir = Path(tempfile.mkdtemp(prefix="hook_"))
     dt_with_box = []
     for i, line in enumerate(lines):
-        esc = (line.replace("\\", "\\\\")
-                   .replace("'",  "\\'")
-                   .replace(":",  "\\:")
-                   .replace(",",  "\\,"))
-        y = start_y + i * line_h
+        lf = cue_dir / f"hook_{i}.txt"
+        lf.write_text(line, encoding="utf-8")
+        tf_path = str(lf).replace(":", "\\:")
+        y = start_y + i * line_gap
         dt_with_box.append(
             f"drawtext={font_arg}"
             f"fontsize={line_h}:fontcolor=white:borderw=5:bordercolor=black@0.9:"
-            f"box=1:boxcolor=black@0.45:boxborderw=12:"
+            f"box=1:boxcolor=black@0.5:boxborderw=16:"
             f"x=(w-tw)/2:y={y}:"
-            f"text={esc}"
+            f"textfile={tf_path}"
         )
 
     vf_filter = ",".join(dt_with_box)
@@ -353,6 +357,10 @@ def _make_hook_card(hook_text: str, first_clip: str,
         out,
     ]
     r = subprocess.run(cmd, capture_output=True)
+    # Clean up hook text files
+    for f in cue_dir.iterdir():
+        f.unlink(missing_ok=True)
+    cue_dir.rmdir()
     if r.returncode != 0:
         print(f"  [Video] Hook card failed (non-fatal): {r.stderr[-300:].decode(errors='replace')}")
     return r.returncode == 0
