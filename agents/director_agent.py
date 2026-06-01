@@ -378,6 +378,15 @@ def _generate_brief_via_groq(
         user_parts.insert(0,
             f"CREATIVE DIRECTION FROM USER (highest priority — the video MUST be "
             f"about this): {prompt}")
+    else:
+        # Only avoid recent topics when the user didn't pin a specific prompt.
+        try:
+            from agents.topic_guard import avoid_clause
+            clause = avoid_clause()
+            if clause:
+                user_parts.append(clause)
+        except Exception:
+            pass
     if insights:
         user_parts.append(insights)
     if critique_feedback:
