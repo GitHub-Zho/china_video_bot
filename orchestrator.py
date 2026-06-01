@@ -14,7 +14,8 @@ from agents.voice_agent      import generate_voice, generate_voice_scenes
 from agents.video_agent      import assemble_video
 from agents.publisher_agent  import upload_video
 from agents.analytics_agent  import run_pending_analytics, extract_insights
-from agents.qa_agent         import qa_check
+from agents.qa_agent         import qa_check, adjust_params_from_qa
+from agents.video_agent      import VideoRenderParams, rerender_subtitles, cleanup_raw
 from config.settings         import OUTPUT_DIR, FFPROBE_BIN, HOOK_CARD_SECONDS
 
 
@@ -89,6 +90,34 @@ def _quality_check(video_path: str, audio_path: str,
     return ok
 
 
+def _qa_and_remediate(vid: str, video_paths: dict) -> None:
+    """
+    Phase 3 — QA the video, and if the verifier flags fixable subtitle issues,
+    adjust render params for THIS video and re-burn subtitles on both variants
+    (no full re-render). Bounded to one remediation pass.
+    """
+    yt_path = video_paths.get("youtube", "")
+    if not yt_path:
+        return
+
+    report = qa_check(yt_path, hook_seconds=HOOK_CARD_SECONDS)
+
+    params = VideoRenderParams()
+    new_params, changed = adjust_params_from_qa(report, params)
+    if not changed:
+        cleanup_raw(vid)
+        return
+
+    # Re-burn subtitles only (no full re-render). One bounded pass — we trust the
+    # rule-based adjustment rather than burning another vision call to re-verify.
+    print(f"  [QC] Auto-remediation: re-burning subtitles for this video "
+          f"(font={new_params.fontsize_pct:.3f}, y={new_params.subtitle_y:.2f})…")
+    for variant in ("youtube", "reels"):
+        rerender_subtitles(vid, variant, new_params, hook_seconds=HOOK_CARD_SECONDS)
+    print("  [QC] ✅ Remediation applied")
+    cleanup_raw(vid)
+
+
 def run_pipeline(audience_type: str = None, dry_run: bool = False,
                  prompt: str = "") -> str:
     """
@@ -144,12 +173,12 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False,
                                   hook_text=brief.hook,
                                   scene_durations=scene_durations)
 
-    # ── Quality check (technical + Claude Vision frame analysis) ─
+    # ── Quality check + auto-remediation (Phase 3) ───────────────
     print("\n  [QC] Running post-generation checks…")
     yt_path = video_paths.get("youtube", "")
     if yt_path:
         _quality_check(yt_path, audio_path, hook_seconds=HOOK_CARD_SECONDS)
-        qa_check(yt_path, hook_seconds=HOOK_CARD_SECONDS)
+        _qa_and_remediate(vid, video_paths)
 
     if dry_run:
         print(f"\n✅ DRY RUN — videos saved locally (not uploaded):")
@@ -229,12 +258,12 @@ def run_pipeline_from_folder(
                                   hook_text=brief.hook,
                                   scene_durations=scene_durations)
 
-    # ── Quality check ─────────────────────────────────────────
+    # ── Quality check + auto-remediation (Phase 3) ───────────────
     print("\n  [QC] Running post-generation checks…")
     yt_path = video_paths.get("youtube", "")
     if yt_path:
         _quality_check(yt_path, audio_path, hook_seconds=HOOK_CARD_SECONDS)
-        qa_check(yt_path, hook_seconds=HOOK_CARD_SECONDS)
+        _qa_and_remediate(vid, video_paths)
 
     if dry_run:
         print(f"\n✅ DRY RUN — videos saved locally:")

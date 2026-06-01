@@ -14,6 +14,7 @@ MoviePy path kept as fallback for legacy image-only calls.
 import random
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from config.settings import (
@@ -21,6 +22,17 @@ from config.settings import (
     FPS, SLIDE_DURATION, FADE_DURATION, OUTPUT_DIR,
     FFMPEG_BIN, FFPROBE_BIN, HOOK_CARD_SECONDS,
 )
+
+
+@dataclass
+class VideoRenderParams:
+    """
+    Per-video subtitle render parameters. Starts at defaults; QA remediation
+    (Phase 3) tweaks a COPY for one video without touching global settings.
+    """
+    fontsize_pct: float = 0.040    # subtitle font as fraction of video height
+    subtitle_y:   float = 0.80     # vertical position (fraction from top)
+    max_cue_dur:  float = 10.0     # max seconds a cue stays on screen
 
 
 # ── Bundled caption font ───────────────────────────────────────────────────────
@@ -163,12 +175,16 @@ def _shift_srt(srt_path: str, offset_ms: int) -> str:
 def _burn_subtitles(raw_path: str, audio_path: str,
                     srt_path: str, out_path: str,
                     subtitle_offset_ms: int = 0,
-                    video_w: int = 1920, video_h: int = 1080) -> None:
+                    video_w: int = 1920, video_h: int = 1080,
+                    params: VideoRenderParams | None = None) -> None:
     """Attach audio + burn subtitles: raw video → final MP4.
 
     subtitle_offset_ms: shift timestamps forward (hook card prepended).
     video_w / video_h:  actual output dimensions — subtitle size scales with these.
+    params:             per-video render params (font size / position / cue cap).
     """
+    if params is None:
+        params = VideoRenderParams()
     mode = _subtitle_mode()
 
     # If a hook card was prepended, both the subtitles AND the audio must be
@@ -192,11 +208,8 @@ def _burn_subtitles(raw_path: str, audio_path: str,
     if mode == "copy":
         vf_args = []
     elif mode == "libass":
-        # FontSize in ASS/libass is in "script resolution" units (not pixels).
-        # Approximate: FontSize ≈ 3.2% of video height gives good proportions.
-        font_size = max(20, int(video_h * 0.032))
-        # MarginV: keep text above platform UI (bottom 15% for Instagram/YouTube Shorts)
-        margin_v  = int(video_h * 0.12)
+        font_size = max(20, int(video_h * (params.fontsize_pct * 0.8)))
+        margin_v  = int(video_h * (1 - params.subtitle_y))
         safe_srt  = active_srt.replace("\\", "/").replace(":", "\\:")
         vf_args   = [
             "-vf",
@@ -209,7 +222,10 @@ def _burn_subtitles(raw_path: str, audio_path: str,
         ]
     else:
         cue_dir = Path(tempfile.mkdtemp(prefix="cues_"))
-        vf_args = ["-vf", _drawtext_filter(active_srt, cue_dir, video_w, video_h)]
+        vf_args = ["-vf", _drawtext_filter(active_srt, cue_dir, video_w, video_h,
+                                           fontsize_pct=params.fontsize_pct,
+                                           subtitle_y=params.subtitle_y,
+                                           max_cue_dur=params.max_cue_dur)]
 
     cmd = [
         FFMPEG_BIN, "-y",
@@ -385,7 +401,8 @@ def _make_hook_card(hook_text: str, first_clip: str,
 
 def assemble_video(video_id: str, media_items, audio_path: str,
                    srt_path: str, hook_text: str = "",
-                   scene_durations: list[float] | None = None) -> dict[str, str]:
+                   scene_durations: list[float] | None = None,
+                   params: VideoRenderParams | None = None) -> dict[str, str]:
     """
     Build YouTube (16:9) and Reels (9:16) MP4s from mixed media.
 
@@ -399,6 +416,9 @@ def assemble_video(video_id: str, media_items, audio_path: str,
     Returns {"youtube": path, "reels": path}
     """
     from config.settings import MIN_CLIP_SECONDS, MAX_CLIP_SECONDS
+
+    if params is None:
+        params = VideoRenderParams()
 
     # Normalise legacy str list → MediaItem list
     from agents.media_agent import MediaItem
@@ -511,10 +531,16 @@ def assemble_video(video_id: str, media_items, audio_path: str,
             if r.returncode != 0:
                 raise RuntimeError(f"Concat failed:\n{r.stderr[-500:].decode()}")
 
+            # Persist the raw (no-subtitle) video so QA remediation can re-burn
+            # subtitles with adjusted params WITHOUT re-rendering everything.
+            raw_keep = str(out_dir / f"{variant}_raw.mp4")
+            subprocess.run([FFMPEG_BIN, "-y", "-i", raw_mp4,
+                            "-c:v", "copy", raw_keep], capture_output=True)
+
             # ── Step 4: audio + subtitles → final ────────────────────
             _burn_subtitles(raw_mp4, audio_path, srt_path, out_path,
                             subtitle_offset_ms=int(hook_dur * 1000),
-                            video_w=w, video_h=h)
+                            video_w=w, video_h=h, params=params)
 
         finally:
             # Clean up temp segments
@@ -526,3 +552,41 @@ def assemble_video(video_id: str, media_items, audio_path: str,
         outputs[variant] = out_path
 
     return outputs
+
+
+# ── Phase 3: re-burn subtitles only (QA remediation) ──────────────────────────
+
+def rerender_subtitles(video_id: str, variant: str,
+                       params: VideoRenderParams,
+                       hook_seconds: float = HOOK_CARD_SECONDS) -> str | None:
+    """
+    Re-burn subtitles onto the saved raw video with adjusted params, WITHOUT
+    re-rendering clips. Used by the QA remediation loop (Phase 3).
+
+    Reads:  output/{vid}/{variant}_raw.mp4, audio.mp3, subtitles.srt
+    Writes: output/{vid}/{variant}.mp4  (overwrites the final)
+    Returns the output path, or None if the raw video isn't available.
+    """
+    base    = Path(OUTPUT_DIR) / video_id
+    raw     = base / f"{variant}_raw.mp4"
+    audio   = base / "audio.mp3"
+    srt     = base / "subtitles.srt"
+    out     = base / f"{variant}.mp4"
+    if not (raw.exists() and audio.exists() and srt.exists()):
+        print(f"  [Video] rerender: missing raw/audio/srt for {video_id}/{variant}")
+        return None
+
+    w, h = (YOUTUBE_W, YOUTUBE_H) if variant == "youtube" else (REELS_W, REELS_H)
+    print(f"  [Video] Re-burning {variant} subtitles "
+          f"(font={params.fontsize_pct:.3f}, y={params.subtitle_y:.2f})…")
+    _burn_subtitles(str(raw), str(audio), str(srt), str(out),
+                    subtitle_offset_ms=int(hook_seconds * 1000),
+                    video_w=w, video_h=h, params=params)
+    return str(out)
+
+
+def cleanup_raw(video_id: str) -> None:
+    """Remove the persisted *_raw.mp4 files once a video is finalised."""
+    base = Path(OUTPUT_DIR) / video_id
+    for raw in base.glob("*_raw.mp4"):
+        raw.unlink(missing_ok=True)

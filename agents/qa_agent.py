@@ -166,6 +166,74 @@ def _analyse_frames(frames: list[tuple[float, Path]]) -> tuple[list[QAIssue], bo
     return issues, True
 
 
+# ── Phase 3: QA → render-param adjustments ────────────────────────────────────
+
+def adjust_params_from_qa(report: "QAReport", current) -> tuple:
+    """
+    Map QA issues to per-video render-param tweaks. Returns (new_params, changed).
+
+    Uses within-report CONSENSUS (not per-frame), because the verifier's
+    subjective size calls vary frame-to-frame. Only acts when a clear majority
+    of subtitle issues point the same way → one bounded nudge. Applies to a COPY
+    for THIS video only; never touches global settings.
+    """
+    from dataclasses import replace
+
+    sub_issues = [i for i in report.issues if i.category == "subtitle"]
+    too_large = too_small = too_low = too_high = lingering = 0
+    for i in sub_issues:
+        d = i.description.lower()
+        if any(k in d for k in ("too large", "very large", "too big", "obscur",
+                                 "takes up", "overflow", "covers", "dominates")):
+            too_large += 1
+        if any(k in d for k in ("too small", "very small", "barely visible",
+                                 "hard to read", "tiny", "difficult to read")):
+            too_small += 1
+        if any(k in d for k in ("too low", "cut off", "below", "bottom edge",
+                                 "clipped at the bottom", "covered by", "ui")):
+            too_low += 1
+        if any(k in d for k in ("too high", "middle of", "center of the frame")):
+            too_high += 1
+        if any(k in d for k in ("lingering", "still showing", "stays too",
+                                 "doesn't clear", "remains on")):
+            lingering += 1
+
+    fontsize_pct = current.fontsize_pct
+    subtitle_y   = current.subtitle_y
+    max_cue_dur  = current.max_cue_dur
+    notes = []
+
+    # Size: act only on a clear majority direction (avoids per-frame noise)
+    if too_large >= 2 and too_large > too_small:
+        fontsize_pct = round(max(0.030, fontsize_pct * 0.85), 4)
+        notes.append(f"font ↓ → {fontsize_pct}")
+    elif too_small >= 2 and too_small > too_large:
+        fontsize_pct = round(min(0.055, fontsize_pct * 1.15), 4)
+        notes.append(f"font ↑ → {fontsize_pct}")
+
+    # Position (objective — more reliable)
+    if too_low >= 2 and too_low > too_high:
+        subtitle_y = round(max(0.70, subtitle_y - 0.04), 3)   # move up
+        notes.append(f"y ↑ → {subtitle_y}")
+    elif too_high >= 2 and too_high > too_low:
+        subtitle_y = round(min(0.86, subtitle_y + 0.04), 3)   # move down
+        notes.append(f"y ↓ → {subtitle_y}")
+
+    # Lingering cue
+    if lingering >= 2:
+        max_cue_dur = round(max(2.5, max_cue_dur - 1.0), 1)
+        notes.append(f"cue ↓ → {max_cue_dur}")
+
+    new_params = replace(current, fontsize_pct=fontsize_pct,
+                         subtitle_y=subtitle_y, max_cue_dur=max_cue_dur)
+    changed = (new_params != current)
+    if changed:
+        print(f"  [QA] Consensus adjustments "
+              f"(large={too_large} small={too_small} low={too_low} "
+              f"high={too_high} linger={lingering}): {', '.join(notes)}")
+    return new_params, changed
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def qa_check(
