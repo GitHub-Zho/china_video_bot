@@ -77,3 +77,60 @@ None detected.
 **Status:** ✅ Applied
 
 ---
+
+## [3] 2026-06-01 · RECORD — Architecture decisions & user feedback verbatim
+
+**Source:** Multi-session conversation history → Claude synthesis
+
+**Analysis:**
+This entry documents all key decisions and user's original feedback so a future Claude
+or human reviewer can understand the WHY behind every major parameter — not just what changed.
+
+**User's original feedback (exact intent):**
+
+1. "语音朗读得太像 AI 了，没有情感起伏，也没有语速快慢的变化"
+   Voice sounds robotic, no emotional variation, no pacing changes.
+   → Switched from edge-tts AriaNeural to Kokoro af_heart (local, free, warmer).
+   → ElevenLabs Starter ($5/mo) recommended when channel monetises — best emotional range.
+
+2. "视频不需要到60秒，太长了"
+   60 seconds is too long for Reels/Shorts format.
+   → TARGET_YOUTUBE_SECONDS 60→32s, SLIDE_DURATION 5→4s, narration 10-15 words → 6-10 words.
+   → Research confirms 15-30s optimal for Instagram Reels; 32s works for both platforms.
+
+3. "他们通常会在视频的第一帧加一些文字叙述来吸引注意力"
+   Best practice: first frame freeze + bold hook text stops scrolling.
+   For faceless channels, bold text overlay works equally well as face-reveal.
+   → Added HOOK_CARD_SECONDS=2.0 freeze frame with hook text. Proven +50pct 3-second retention.
+
+4. "如果我给你一些素材（比如一些小吃之类的图片），你能替我整理归纳，根据图片进行分析"
+   User wants to provide own photos, get auto-generated matching narration and video.
+   → Built media_analyst_agent.py: Claude Vision analyses each image per-image narration.
+   → run_pipeline_from_folder(path, dry_run=True) in orchestrator.
+
+5. "内容不够有吸引力 / 照片不够好 / 字幕也没有显示在屏幕"
+   Content factual but not curiosity-driven. Visual queries too generic. No subtitles on Mac.
+   → Guidelines v2 (curiosity gaps, cinematic queries). Switched to conda FFmpeg (has drawtext).
+   → Rewrote subtitle approach: drawtext+enable per cue, unquoted text with escaped chars.
+
+**Key technical decisions:**
+
+- Kokoro over edge-tts: free, local, no rate limits, more natural prosody for travel content.
+- drawtext with enable not sendcmd: sendcmd breaks on commas and apostrophes in text.
+- FFMPEG_BIN from sys.executable.parent: Homebrew FFmpeg lacks libfreetype; conda-forge has it.
+- Hook card is visual-only (silent); subtitle timestamps shifted by HOOK_CARD_SECONDS via _shift_srt().
+- Director guidelines in SYSTEM prompt not USER prompt: forces Groq to treat as hard constraints.
+
+**What to try next:**
+
+- Try Kokoro af_bella or af_jessica for more expressive delivery (af_heart is warm but neutral on peaks).
+- Hook card font size (7.5pct of frame height) may need tuning for Reels 9:16 aspect ratio.
+- When channel monetises: upgrade to ElevenLabs Starter ($5/mo) for better emotional range.
+
+**Action taken:** Documentation entry only.
+
+**Conflicts with existing rules:** None.
+
+**Status:** ✅ Documentation only
+
+---
