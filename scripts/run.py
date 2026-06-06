@@ -95,7 +95,8 @@ def main() -> int:
         else:
             result = run_pipeline(
                 audience_type=args.audience, dry_run=args.dry_run,
-                prompt=args.prompt, style=args.style, review=args.review
+                prompt=args.prompt, style=args.style, review=args.review,
+                target_seconds=args.seconds
             )
 
         if result:

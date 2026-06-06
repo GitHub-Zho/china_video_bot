@@ -33,14 +33,22 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 CRITIC_PASS_SCORE = 7
 MAX_RETRIES = 2
 
-# Narration length targets (words). Subtitles wrap to ~2 lines at 6-12 words.
-MIN_NARRATION_WORDS = 6
-MAX_NARRATION_WORDS = 12
+# Narration length targets (words). Short punchy lines are GOOD for Reels —
+# 4 words ("Twenty dollars a plate") is fine; we only block 1-3 word filler
+# ("Explore the unknown") and overlong lines that wrap to 4-5 subtitle lines.
+MIN_NARRATION_WORDS = 4
+MAX_NARRATION_WORDS = 13
 
 
 class BriefValidationError(Exception):
     """Soft failure — brief content didn't meet rules. Triggers a retry with
-    feedback, NOT a template fallback (which would lose the user's prompt)."""
+    feedback, NOT a template fallback (which would lose the user's prompt).
+
+    Carries the offending brief so the caller can keep it as a last resort
+    (a prompt-faithful brief beats a generic template)."""
+    def __init__(self, message: str, brief=None):
+        super().__init__(message)
+        self.brief = brief
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -444,22 +452,6 @@ def _generate_brief_via_groq(
     if not raw_scenes:
         raise ValueError("Groq returned no scenes in the brief")
 
-    # Validate word counts — flag both too-short and too-long narrations.
-    # Too short → flashes by; too long → wraps to 4-5 lines (covers the frame).
-    bad = []
-    for i, s in enumerate(raw_scenes):
-        wc = len(s.get("narration", "").split())
-        if wc < MIN_NARRATION_WORDS:
-            bad.append((i, s.get("narration", ""), f"{wc}w too short"))
-        elif wc > MAX_NARRATION_WORDS:
-            bad.append((i, s.get("narration", ""), f"{wc}w too long"))
-    if bad:
-        examples = "; ".join(f'Scene {i} ({why}): "{n}"' for i, n, why in bad[:3])
-        raise BriefValidationError(
-            f"Narrations must be {MIN_NARRATION_WORDS}-{MAX_NARRATION_WORDS} words. "
-            f"Problems: {examples}. Rewrite ALL narrations to this length."
-        )
-
     scenes = [
         ScenePlan(
             index=i,
@@ -471,7 +463,7 @@ def _generate_brief_via_groq(
         for i, s in enumerate(raw_scenes)
     ]
 
-    return CreativeBrief(
+    brief = CreativeBrief(
         title=data.get("title", "Discover China"),
         description=data.get("description", ""),
         tags=data.get("tags", ["China", "Travel"]),
@@ -483,6 +475,24 @@ def _generate_brief_via_groq(
         scenes=scenes,
         target_seconds=target_seconds,
     )
+
+    # Validate word counts — flag both too-short and too-long narrations.
+    bad = []
+    for i, s in enumerate(raw_scenes):
+        wc = len(s.get("narration", "").split())
+        if wc < MIN_NARRATION_WORDS:
+            bad.append((i, s.get("narration", ""), f"{wc}w too short"))
+        elif wc > MAX_NARRATION_WORDS:
+            bad.append((i, s.get("narration", ""), f"{wc}w too long"))
+    if bad:
+        examples = "; ".join(f'Scene {i} ({why}): "{n}"' for i, n, why in bad[:3])
+        raise BriefValidationError(
+            f"Narrations must be {MIN_NARRATION_WORDS}-{MAX_NARRATION_WORDS} words. "
+            f"Problems: {examples}. Rewrite ALL narrations to this length.",
+            brief=brief,   # keep it — a prompt-faithful brief beats a generic template
+        )
+
+    return brief
 
 
 def _critique_brief(brief: CreativeBrief) -> tuple[int, str]:
@@ -544,6 +554,7 @@ def create_brief(
     feedback   = ""
 
     brief = None
+    last_attempt = None   # last brief produced, even if it failed validation
     for attempt in range(MAX_RETRIES + 1):
         label = "Calling Groq" if attempt == 0 else f"Retry {attempt}/{MAX_RETRIES}"
         print(f"  [Director] {label} (target={target_seconds:.0f}s, "
@@ -552,11 +563,13 @@ def create_brief(
             brief = _generate_brief_via_groq(
                 audience_type, target_seconds, feedback, insights, guidelines, prompt
             )
+            last_attempt = brief
         except BriefValidationError as e:
             # Soft failure — retry with the validation message as feedback.
-            # Does NOT fall back to template (which would lose the prompt).
             print(f"  [Director] ✗ Validation: {e}")
             feedback = str(e)
+            if e.brief is not None:
+                last_attempt = e.brief   # keep it as a prompt-faithful fallback
             continue
         except Exception as e:
             print(f"  [Director] Groq unavailable ({e}), using template")
@@ -568,9 +581,14 @@ def create_brief(
                   f"({len(brief.scenes)} scenes)")
             return brief
 
-    # Exhausted retries — use last valid brief, or template if none passed validation
+    # Exhausted retries. Prefer the last on-topic attempt over a generic template —
+    # especially when the user pinned a prompt (a roast-duck script with one slightly
+    # short line beats a generic "hidden China" template).
+    if last_attempt is not None:
+        print(f"  [Director] ⚠️  Max retries — using last on-topic attempt "
+              f"(\"{last_attempt.topic}\")")
+        return last_attempt
     if brief is not None:
-        print(f"  [Director] ⚠️  Max retries — using last attempt")
         return brief
     print(f"  [Director] ⚠️  No valid brief — using template")
     return _fallback_brief(audience_type, target_seconds, prompt)

@@ -247,15 +247,16 @@ def _resolve_style(style: str):
 
 
 def run_pipeline(audience_type: str = None, dry_run: bool = False,
-                 prompt: str = "", style: str = "", review: bool = False) -> str:
+                 prompt: str = "", style: str = "", review: bool = False,
+                 target_seconds: float = None) -> str:
     """
     Full pipeline for one video.
-    review=True   → generate the script ONLY, save it for approval, and STOP
-                    before spending API on voice/media/video. Edit the saved
-                    brief.json, then run with --from-brief to build it.
-    dry_run=True  → assembles video locally, skips YouTube upload.
-    prompt        → free-text creative direction (e.g. "Xi'an Terracotta Warriors").
-    style         → name of a saved StyleProfile to imitate (Phase 5).
+    review=True    → generate the script ONLY, save it for approval, and STOP
+                     before spending API on voice/media/video.
+    dry_run=True   → assembles video locally, skips YouTube upload.
+    prompt         → free-text creative direction.
+    style          → name of a saved StyleProfile to imitate.
+    target_seconds → desired video length; controls how many scenes the Director plans.
     """
     vid = _video_id()
     print(f"\n{'='*55}")
@@ -266,7 +267,7 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False,
 
     # ── 1. Director: plan the entire video scene-by-scene ────
     print("\n[1/5] Director planning scenes…")
-    brief = create_brief(audience_type, prompt=prompt)
+    brief = create_brief(audience_type, prompt=prompt, target_seconds=target_seconds)
     print(f"      Topic    : {brief.topic}  |  Audience: {brief.audience_type}")
 
     out_dir = Path(OUTPUT_DIR) / vid
