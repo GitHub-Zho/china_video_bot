@@ -248,17 +248,31 @@ def _resolve_style(style: str):
 
 def run_pipeline(audience_type: str = None, dry_run: bool = False,
                  prompt: str = "", style: str = "", review: bool = False,
-                 target_seconds: float = None) -> str:
+                 target_seconds: float = None, video_type: str = "both"):
     """
-    Full pipeline for one video.
-    review=True    → generate the script ONLY, save it for approval, and STOP
-                     before spending API on voice/media/video.
-    dry_run=True   → assembles video locally, skips YouTube upload.
-    prompt         → free-text creative direction.
-    style          → name of a saved StyleProfile to imitate.
-    target_seconds → desired video length; controls how many scenes the Director plans.
+    Full pipeline for one video (or both formats).
+    video_type     → "growth" (hook/engagement), "info" (educational story), or
+                     "both" (default — make one of each for the same topic).
+    review=True    → generate the script(s) ONLY and stop for approval.
+    dry_run=True   → assemble locally, skip YouTube upload.
+    prompt/style/target_seconds → as before.
+
+    Returns a single path/id (one type) or a {type: path/id} dict ("both").
     """
-    vid = _video_id()
+    if video_type == "both":
+        results = {}
+        for vt in ("growth", "info"):
+            print(f"\n############  {vt.upper()} version  ############")
+            results[vt] = _run_one(vt, audience_type, dry_run, prompt, style,
+                                   review, target_seconds)
+        return results
+    return _run_one(video_type, audience_type, dry_run, prompt, style,
+                    review, target_seconds)
+
+
+def _run_one(video_type, audience_type, dry_run, prompt, style, review,
+             target_seconds) -> str:
+    vid = _video_id() + f"_{video_type}"
     print(f"\n{'='*55}")
     print(f"  China Video Bot  ·  {vid}")
     print(f"{'='*55}")
@@ -266,8 +280,9 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False,
     render_params = _resolve_style(style)
 
     # ── 1. Director: plan the entire video scene-by-scene ────
-    print("\n[1/5] Director planning scenes…")
-    brief = create_brief(audience_type, prompt=prompt, target_seconds=target_seconds)
+    print(f"\n[1/5] Director planning scenes ({video_type})…")
+    brief = create_brief(audience_type, prompt=prompt,
+                         target_seconds=target_seconds, video_type=video_type)
     print(f"      Topic    : {brief.topic}  |  Audience: {brief.audience_type}")
 
     out_dir = Path(OUTPUT_DIR) / vid
@@ -278,10 +293,9 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False,
     # ── Script review gate ───────────────────────────────────
     if review:
         _print_script(brief)
-        print(f"\n  📋 Script saved → output/{vid}/brief.json")
-        print(f"     Review/edit the narration + visual_query, then build it with:")
-        print(f"       python scripts/run.py --from-brief output/{vid}/brief.json"
-              f"{' --dry-run' if dry_run else ''}")
+        print(f"\n  📋 {video_type} script saved → output/{vid}/brief.json")
+        print(f"     Build it with: python scripts/run.py --from-brief "
+              f"output/{vid}/brief.json{' --dry-run' if dry_run else ''}")
         return str(out_dir / "brief.json")
 
     return _build_from_brief(vid, brief, dry_run=dry_run, render_params=render_params)

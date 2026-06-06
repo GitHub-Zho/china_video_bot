@@ -42,6 +42,9 @@ def main() -> int:
                         help="Name of a saved StyleProfile to imitate")
     parser.add_argument("--learn-style", nargs=2, metavar=("SOURCE", "NAME"), default=None,
                         help="Analyse a reference video (file or URL) and save it as a named style, then exit")
+    parser.add_argument("--type", dest="video_type",
+                        choices=["growth", "info", "both"], default="both",
+                        help="Video format: growth (hook/engagement), info (educational), or both (default)")
     parser.add_argument("--review", action="store_true",
                         help="Generate the SCRIPT only and stop for approval (edit brief.json, then --from-brief)")
     parser.add_argument("--from-brief", metavar="BRIEF_JSON", default=None,
@@ -96,9 +99,14 @@ def main() -> int:
             result = run_pipeline(
                 audience_type=args.audience, dry_run=args.dry_run,
                 prompt=args.prompt, style=args.style, review=args.review,
-                target_seconds=args.seconds
+                target_seconds=args.seconds, video_type=args.video_type
             )
 
+        if isinstance(result, dict):
+            print("\n[run.py] ✅ Done:")
+            for k, v in result.items():
+                print(f"   {k}: {v}")
+            return 0
         if result:
             print(f"\n[run.py] ✅ Done: {result}")
             return 0

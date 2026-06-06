@@ -160,16 +160,11 @@ def _load_insights() -> str:
         return ""
 
 
-def _load_guidelines() -> str:
+def _load_guidelines(video_type: str = "growth") -> str:
     """
-    Load human-curated creative guidelines from data/director_guidelines.json.
-
-    This file is maintained by Claude based on video quality feedback.
-    The Director injects these rules into every Groq generation prompt,
-    so edits here directly shape what the next video looks like.
-
-    Returns a formatted string ready to embed in the system prompt,
-    or empty string if the file doesn't exist / has no content.
+    Load human-curated creative guidelines, including the block for the chosen
+    video_type ("growth" or "info"). Shared do/avoid apply to both; the formats
+    section adds type-specific voice/structure/interaction rules.
     """
     path = Path("data/director_guidelines.json")
     if not path.exists():
@@ -182,24 +177,44 @@ def _load_guidelines() -> str:
             f"=== CREATIVE GUIDELINES (version {g.get('version', 1)}, "
             f"updated {g.get('updated', '?')}) ==="
         ]
+        if g.get("persona"):
+            lines.append("WHO YOU ARE: " + g["persona"])
+
+        # Format-specific block (growth vs info)
+        fmt = (g.get("formats") or {}).get(video_type)
+        if fmt:
+            lines.append(f"\n=== THIS VIDEO'S FORMAT: {video_type.upper()} ===")
+            lines.append(f"Goal: {fmt.get('goal','')}")
+            lines.append(f"Voice: {fmt.get('voice','')}")
+            if fmt.get("use_interaction_hook"):
+                lines.append("Interaction hook: YES — end with comment/like bait "
+                             "(open question, 'name in comments', mild debate).")
+                if fmt.get("cta_patterns"):
+                    lines.append("CTA options: " + " | ".join(fmt["cta_patterns"]))
+            else:
+                lines.append("Interaction hook: NO — do NOT bait comments/likes. "
+                             "End calm and reflective.")
+                if fmt.get("cta_patterns"):
+                    lines.append("CTA options: " + " | ".join(fmt["cta_patterns"]))
+            if fmt.get("hook_patterns"):
+                lines.append("Hook patterns: " + " | ".join(fmt["hook_patterns"]))
+            if fmt.get("example_good_narrations"):
+                lines.append(f"GOOD {video_type} narration examples:")
+                lines.extend(f'  "{ex}"' for ex in fmt["example_good_narrations"])
+
         if g.get("do"):
-            lines.append("RULES — always do these:")
+            lines.append("\nRULES — always do these (both formats):")
             lines.extend(f"  ✓ {rule}" for rule in g["do"])
         if g.get("avoid"):
-            lines.append("RULES — never do these:")
+            lines.append("RULES — never do these (both formats):")
             lines.extend(f"  ✗ {rule}" for rule in g["avoid"])
-        if g.get("style_notes"):
-            lines.append("STYLE:")
-            lines.extend(f"  → {note}" for note in g["style_notes"])
-        if g.get("example_good_narrations"):
-            lines.append("GOOD narration examples (use as reference):")
-            lines.extend(f'  "{ex}"' for ex in g["example_good_narrations"])
         if g.get("example_bad_narrations"):
             lines.append("BAD narration examples (never write like this):")
             lines.extend(f'  "{ex}"' for ex in g["example_bad_narrations"])
+
         result = "\n".join(lines)
-        print(f"  [Director] 📋 Guidelines loaded (v{g.get('version',1)}, "
-              f"{len(g.get('do',[]))} rules, {len(g.get('avoid',[]))} avoids)")
+        print(f"  [Director] 📋 Guidelines v{g.get('version',1)} loaded "
+              f"(format={video_type}, {len(g.get('do',[]))} shared rules)")
         return result
     except Exception as e:
         print(f"  [Director] ⚠️  Could not load guidelines: {e}")
@@ -537,20 +552,21 @@ def create_brief(
     audience_type: str | None = None,
     target_seconds: float | None = None,
     prompt: str = "",
+    video_type: str = "growth",
 ) -> CreativeBrief:
     """
     Create a scene-by-scene creative brief. Uses Groq with critic loop.
     Falls back to curated templates if Groq is unavailable.
 
-    prompt: optional free-text creative direction (e.g. "Xi'an Terracotta Warriors").
-            The video will be built around this topic.
+    prompt:     optional free-text creative direction.
+    video_type: "growth" (hook/engagement) or "info" (educational story).
     target_seconds defaults to TARGET_YOUTUBE_SECONDS from settings.
     """
     if target_seconds is None:
         target_seconds = float(TARGET_YOUTUBE_SECONDS)
 
     insights   = _load_insights()
-    guidelines = _load_guidelines()   # human-curated rules, updated by Claude
+    guidelines = _load_guidelines(video_type)   # format-aware rules
     feedback   = ""
 
     brief = None
