@@ -55,6 +55,12 @@ TARGET_REELS_SECONDS   = 20   # ~5 scenes × 4s
 
 HOOK_CARD_SECONDS = 2.0       # freeze-frame hook card at video start
 
+# Pacing — give each scene room to breathe (avoids the rushed feel).
+SCENE_LEAD_IN     = 0.4       # subtitle appears, THEN narration starts (caption leads voice)
+SCENE_TAIL        = 0.6       # silent beat after the line before the next scene
+MIN_SCENE_SECONDS = 3.2       # each scene holds at least this long (short lines still breathe)
+HOOK_TO_FIRST_GAP = 0.7       # extra breath after the hook card before the first word
+
 # === Publishing ===
 PUBLISH_HOUR     = 9          # 9:00 AM daily
 PUBLISH_TZ       = "America/New_York"

@@ -208,7 +208,11 @@ def _generate_kokoro_scenes(
     if not Path(KOKORO_MODEL).exists() or not Path(KOKORO_VOICES).exists():
         return None
 
+    from config.settings import (SCENE_LEAD_IN, SCENE_TAIL, MIN_SCENE_SECONDS,
+                                  HOOK_TO_FIRST_GAP)
+
     try:
+        import numpy as np
         k = Kokoro(KOKORO_MODEL, KOKORO_VOICES)
 
         all_samples = []
@@ -216,20 +220,38 @@ def _generate_kokoro_scenes(
         scene_durations: list[float] = []
         scene_timings:   list[tuple[int, int, str]] = []   # (start_ms, end_ms, text)
 
-        for narration in narrations:
+        def _silence(seconds: float, sr: int) -> list:
+            return [0.0] * int(seconds * sr)
+
+        for idx, narration in enumerate(narrations):
             text = narration.strip()
             if not text:
-                # Empty narration — give it a tiny silent slot so indices stay aligned
                 scene_durations.append(0.0)
                 scene_timings.append((0, 0, ""))
                 continue
+
             samples, sr = k.create(text, voice=KOKORO_VOICE, speed=KOKORO_SPEED)
             sample_rate = sr
-            start_ms = int(len(all_samples) / sr * 1000)
-            all_samples.extend(samples.tolist())
-            end_ms   = int(len(all_samples) / sr * 1000)
-            scene_durations.append((end_ms - start_ms) / 1000.0)
-            scene_timings.append((start_ms, end_ms, text))
+            nar_dur = len(samples) / sr
+
+            # Lead-in: caption appears, THEN the voice starts (extra on scene 0,
+            # so there's a breath after the hook card). Tail: a beat after the line.
+            lead = SCENE_LEAD_IN + (HOOK_TO_FIRST_GAP if idx == 0 else 0.0)
+            # Whole scene holds at least MIN_SCENE_SECONDS (short lines still breathe)
+            scene_dur = max(MIN_SCENE_SECONDS, lead + nar_dur + SCENE_TAIL)
+            tail = scene_dur - lead - nar_dur
+
+            scene_start_ms = int(len(all_samples) / sr * 1000)
+            all_samples.extend(_silence(lead, sr))      # caption-leads-voice gap
+            voice_start_ms = int(len(all_samples) / sr * 1000)
+            all_samples.extend(samples.tolist())        # the narration
+            voice_end_ms   = int(len(all_samples) / sr * 1000)
+            all_samples.extend(_silence(max(0.0, tail), sr))   # breath after
+
+            scene_durations.append(scene_dur)
+            # Subtitle spans the whole scene (starts at scene_start → leads the voice
+            # by `lead`, so viewers read proper nouns like "Nanluogu Xiang" before hearing them)
+            scene_timings.append((scene_start_ms, voice_end_ms + int(tail*1000*0.5), text))
 
         # ── WAV → MP3 ────────────────────────────────────────────────────────
         import tempfile
