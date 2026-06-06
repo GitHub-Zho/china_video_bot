@@ -1,131 +1,218 @@
 # 🇨🇳 China Video Bot
 
-An automated multi-agent pipeline that generates and publishes short-form China travel & culture videos to YouTube and Instagram Reels — daily, with zero manual intervention.
+Give it a topic → it writes a script, finds matching footage, adds an AI voiceover
+and captions, assembles **YouTube (16:9) + Instagram Reels (9:16)** videos, quality-
+checks them, and (optionally) publishes to YouTube. Short-form China travel/culture
+content, ~25–35s, fully automated, **100% free APIs**.
 
-## What it does
+> **New here?** This README is the operating manual. For deeper detail:
+> `data/AUTONOMOUS_GUIDE.md` (server ops), `data/ROADMAP.md` (architecture + build
+> history + design rationale), `data/learning_log.md` (every decision made & why).
 
-Every day at 9:00 AM UTC the bot:
-
-1. **Generates a script** via Groq (Llama 3.3 70B, free tier) — 60-90 second voiceover copy targeting English-speaking audiences curious about China
-2. **Downloads beautiful images** from Pexels + Unsplash (free APIs) — China landscapes, cities, food, culture
-3. **Creates a voiceover + subtitles** via Microsoft Edge TTS (free) — natural English narration with precisely-timed SRT subtitles
-4. **Assembles the video** via MoviePy + FFmpeg — 1920×1080 YouTube version and 1080×1920 Instagram Reels version, with burned-in subtitles
-5. **Uploads to YouTube** via YouTube Data API v3 with automatic title, description, and tags
-6. **Collects analytics** 3 days after publish and feeds performance data back to improve future scripts
-
-## Two audience types
-
-| Audience | Description |
-|---|---|
-| **Explorer** | People who've seen China content and want hidden gems, lesser-known destinations, surprising facts |
-| **Newcomer** | People curious about China but don't know where to start — first-timer perspective |
-
-## Architecture
-
-```
-Orchestrator
-├── Script Agent    — Groq API (Llama 3.3 70B) + template fallback
-├── Image Agent     — Pexels API + Unsplash API (alternating)
-├── Voice Agent     — edge-tts (Microsoft, free) → MP3 + SRT
-├── Video Agent     — MoviePy slideshow + FFmpeg subtitle burn
-├── Publisher Agent — YouTube Data API v3 (OAuth2, refresh token)
-└── Analytics Agent — YouTube Analytics API v2 → feedback loop
-```
-
-## Tech stack — 100% free APIs
-
-| Component | Tool | Cost |
-|---|---|---|
-| LLM / Script | [Groq](https://console.groq.com) (Llama 3.3 70B) | Free |
-| Images | Pexels API + Unsplash API | Free |
-| Text-to-speech | Microsoft Edge TTS (`edge-tts`) | Free |
-| Video assembly | MoviePy v2 + FFmpeg | Free / open source |
-| Publishing | YouTube Data API v3 | Free quota |
-| Hosting | Oracle Cloud Free Tier (ARM VM) | Always free |
+---
 
 ## Quick start
 
-### 1. Clone & install
 ```bash
-git clone https://github.com/GitHub-Zho/china_video_bot.git
-cd china_video_bot
-python3 -m venv .venv && source .venv/bin/activate
+# 0. one-time setup (see "Setup" below), then:
+
+# Recommended: generate the SCRIPT first, review it, then build the video
+python scripts/run.py --prompt "Beijing roast duck" --review
+#   → prints the 8-scene script + saves output/<id>/brief.json, then STOPS
+#   → read/edit brief.json if you want, then:
+python scripts/run.py --from-brief output/<id>/brief.json --dry-run
+#   → builds locally (no upload). Files: output/<id>/youtube.mp4 + reels.mp4
+
+# Or one-shot (no review):
+python scripts/run.py --prompt "Guilin Li River" --dry-run
+
+# Fully automatic (Director picks a fresh topic, avoids recent ones, publishes):
+python scripts/run.py
+```
+
+`--dry-run` builds locally and skips the YouTube upload. Drop it to publish.
+
+---
+
+## How it works (the pipeline)
+
+```
+You give a topic (--prompt)
+   │
+[1] DIRECTOR (Groq LLM) writes the script
+      · 8 scenes, each = one narration line + one footage search query
+      · reads 3 knowledge sources: guidelines.json + insights.json + style (optional)
+      · self-critiques and rewrites if weak; only states facts it's confident are true
+      │
+      └─► --review STOPS HERE so you can read/edit the script   ◄── YOU (touchpoint 1)
+   │
+[2] VOICE (Kokoro, local TTS) → MP3 + per-scene subtitle timing
+   │
+[3] MEDIA → Pexels + Pixabay candidates per scene
+      · de-duplicated across scenes (no repeated clips)
+      · Gemini "pick best" chooses the candidate that matches the scene
+   │
+[4] VIDEO (FFmpeg) assembles both formats
+      · each clip trimmed to its narration length (audio/subtitle in sync)
+      · 2s hook card up front, Anton-font captions, auto-sized per aspect ratio
+   │
+[QC] Gemini reviews sampled frames
+      · subtitle problems → auto-fixed by re-burning (no full re-render)
+      · footage doesn't match narration → flagged + 3 alternatives downloaded  ◄── YOU (touchpoint 2)
+   │
+[5] PUBLISH to YouTube (skipped with --dry-run)
+      · 3 days later, analytics → insights.json → feeds back into the Director
+```
+
+---
+
+## The two places you step in
+
+**1. Script review (before any media is fetched)**
+```bash
+python scripts/run.py --prompt "..." --review     # see script, stop
+# edit output/<id>/brief.json if needed, then:
+python scripts/run.py --from-brief output/<id>/brief.json --dry-run
+```
+Catches bad/hallucinated lines before spending time on voice/media/video.
+
+**2. Fix a content mismatch (after build)**
+If QC finds footage that doesn't match the narration, it writes
+`output/<id>/review.json` and downloads 3 alternatives to
+`output/<id>/alternatives/scene_NN/`. Look at the `alt_*.jpg` previews, pick one:
+```bash
+python scripts/run.py --fix <id> --scene 6 --pick 2   # use alt_2 for scene 6, rebuild
+```
+
+---
+
+## All commands
+
+```bash
+python scripts/run.py                                # auto daily mode (publishes)
+python scripts/run.py --dry-run                      # auto, build only
+python scripts/run.py --prompt "TOPIC" --review      # script-first (recommended)
+python scripts/run.py --from-brief PATH --dry-run    # build an approved/edited script
+python scripts/run.py --prompt "TOPIC" --dry-run     # one-shot, no review
+python scripts/run.py --audience newcomer            # explorer | newcomer
+python scripts/run.py --seconds 24                   # target length
+python scripts/run.py --from-folder ~/photos         # use YOUR images/clips, not stock
+python scripts/run.py --learn-style ref.mp4 NAME     # learn a reference video's style
+python scripts/run.py --prompt "..." --style NAME    # imitate a learned style
+python scripts/run.py --fix <id> --scene N --pick K  # swap a flagged scene's clip
+```
+
+---
+
+## Agents (what's in `agents/`)
+
+| File | Role | Model |
+|------|------|-------|
+| `director_agent.py` | Plans scenes (narration + visual query); self-critique loop | Groq (text) |
+| `topic_guard.py` | Lists recent topics so the Director avoids repeats | — |
+| `voice_agent.py` | TTS → MP3 + per-scene SRT timing | Kokoro (local) |
+| `media_agent.py` | Download clips, dedup, pick best match, fetch alternatives | Gemini (vision) |
+| `video_agent.py` | FFmpeg assembly, hook card, captions, subtitle re-burn | — |
+| `qa_agent.py` | Frame sampling → subtitle + content-mismatch detection → auto-fix | Gemini (vision) |
+| `vision.py` | Shared verifier wrapper (Gemini, Groq vision fallback) | Gemini/Groq |
+| `style_analyst_agent.py` | Learn & imitate a reference video's style | Gemini + ffprobe |
+| `media_analyst_agent.py` | Turn YOUR photos into a matched script (`--from-folder`) | Gemini (vision) |
+| `analytics_agent.py` | YouTube metrics → insights for the Director | — |
+| `publisher_agent.py` | Upload to YouTube | — |
+| `orchestrator.py` | Wires it together (`run_pipeline`, `run_pipeline_from_brief`, …) | — |
+
+**Design principle:** the *generator* (Groq) and the *verifier* (Gemini) are
+different models on purpose — independent checks, no shared blind spots.
+
+---
+
+## Models & cost — $0
+
+| Job | Provider | Notes |
+|-----|----------|-------|
+| Script generation | **Groq** Llama 3.3 70B | free, 14.4k req/day |
+| Vision (pick footage, QA, style) | **Gemini 2.5 Flash-Lite** | free ~1000/day; Groq Llama-4 vision as fallback |
+| Voice | **Kokoro** (local ONNX) | free, no API; edge-tts fallback |
+| Footage | **Pexels + Pixabay** | free, commercial use |
+| Photo fallback | **Unsplash** | free |
+| Publish | **YouTube Data API** | free quota |
+
+> ⚠️ **Geo-restriction:** Groq and Gemini are **blocked from mainland China**
+> (Gemini: "location not supported"; Groq: 403). Use a **VPN** for local testing,
+> or run on an **overseas server** (Oracle/AWS) where they work directly. The
+> pipeline still builds videos if vision fails (graceful degradation). For a fully
+> China-native stack, swap the verifier to Qwen — see `data/AUTONOMOUS_GUIDE.md §0`.
+>
+> **Optional paid upgrade:** swap the verifier to Claude vision for higher quality
+> (~$0.1–0.4/month at 1 video/day). One change in `agents/vision.py`.
+
+---
+
+## Setup
+
+```bash
+# 1. System: ffmpeg MUST include the drawtext filter (libfreetype)
+#    conda-forge ffmpeg works; Homebrew ffmpeg 8.x may not.
+ffmpeg -filters | grep drawtext        # must print a line
+
+# 2. Python deps
 pip install -r requirements.txt
+
+# 3. Kokoro TTS model files (~350MB, one-time) → ~/.cache/kokoro/
+#    (download script in data/AUTONOMOUS_GUIDE.md §3)
+
+# 4. API keys → .env  (never commit this file)
+GROQ_API_KEY=...        # console.groq.com
+GEMINI_API_KEY=...      # aistudio.google.com/apikey  (new keys start with AQ.)
+PEXELS_API_KEY=...      # pexels.com/api
+PIXABAY_API_KEY=...     # pixabay.com/api/docs
+UNSPLASH_ACCESS_KEY=... # unsplash.com/developers
+# YouTube (only to publish, not for --dry-run):
+YOUTUBE_CLIENT_ID=... ; YOUTUBE_CLIENT_SECRET=... ; YOUTUBE_REFRESH_TOKEN=...
+#   one-time OAuth: python scripts/setup_youtube_oauth.py
 ```
 
-### 2. Configure `.env`
-```bash
-cp .env.example .env   # then fill in your keys
-```
+Daily cron (server): `0 9 * * * cd /path && .venv/bin/python scripts/run.py >> logs/run.log 2>&1`
 
-Required keys:
-- `GROQ_API_KEY` — free at [console.groq.com](https://console.groq.com)
-- `PEXELS_API_KEY` — free at [pexels.com/api](https://www.pexels.com/api/)
-- `UNSPLASH_ACCESS_KEY` — free at [unsplash.com/developers](https://unsplash.com/developers)
-- `YOUTUBE_CLIENT_ID / SECRET / REFRESH_TOKEN` — see YouTube setup below
+---
 
-### 3. YouTube OAuth (one-time)
-```bash
-# Download OAuth client secrets from Google Cloud Console first:
-# → APIs & Services → Credentials → OAuth 2.0 Client ID (Desktop) → Download JSON
-# → Save as credentials/client_secrets.json
+## How it learns / how to give feedback
 
-python scripts/setup_youtube_oauth.py
-```
+Three files persist knowledge across runs (and across Claude sessions):
 
-### 4. Run
-```bash
-# One video right now (no upload)
-python main.py --dry-run
+- **`data/director_guidelines.json`** — creative rules the Director obeys every run.
+  Don't like how scripts read? Add a rule + bump `version`. No code change needed.
+- **`data/insights.json`** — auto-distilled from YouTube performance.
+- **`data/learning_log.md`** — human-readable audit trail of every rule change + QA finding.
 
-# One video right now + upload
-python main.py --now
+Quality defense is layered: (1) you review the script, (2) Director won't invent
+unfindable claims, (3) Gemini picks best-matching footage, (4) QA flags + offers
+alternatives for any mismatch that slips through.
 
-# Start the daily scheduler (9:00 AM ET)
-python main.py
-```
+---
 
-## Deploy to Oracle Cloud (recommended)
-
-```bash
-# On your Oracle Cloud Ubuntu ARM instance:
-bash deploy/setup_server.sh   # installs all dependencies
-nano .env                      # fill in your keys
-bash deploy/setup_cron.sh      # sets up daily cron at 09:00 UTC
-```
-
-## Project structure
+## Output layout
 
 ```
-china_video_bot/
-├── agents/
-│   ├── script_agent.py      # LLM script generation + template fallback
-│   ├── image_agent.py       # Pexels + Unsplash image downloader
-│   ├── voice_agent.py       # edge-tts TTS + accurate SRT timing
-│   ├── video_agent.py       # MoviePy slideshow + FFmpeg subtitle burn
-│   ├── publisher_agent.py   # YouTube upload (cloud + local OAuth modes)
-│   ├── analytics_agent.py   # YouTube Analytics collection + feedback
-│   └── subtitle_agent.py    # Naive SRT fallback utility
-├── config/
-│   ├── settings.py          # All configuration constants
-│   └── prompts.py           # LLM system prompts + feedback template
-├── deploy/
-│   ├── setup_server.sh      # Oracle Cloud first-time setup
-│   └── setup_cron.sh        # Daily cron installation
-├── scripts/
-│   └── setup_youtube_oauth.py  # One-time YouTube OAuth flow
-├── data/                    # Analytics + publish history (gitignored)
-├── output/                  # Generated videos (gitignored)
-├── orchestrator.py          # Full pipeline runner
-└── main.py                  # CLI entry point + APScheduler
+output/<id>/
+├── brief.json          # the script (editable; --from-brief builds it)
+├── metadata.json       # title/description/tags/scenes
+├── audio.mp3           # voiceover
+├── subtitles.srt       # captions
+├── media/00.mp4 …      # one clip/photo per scene
+├── youtube.mp4         # 1920×1080 final
+├── reels.mp4           # 1080×1920 final
+├── review.json         # (if QC found mismatches) what to fix + how
+└── alternatives/scene_NN/alt_K.{mp4,jpg}   # candidate swaps for --fix
 ```
 
-## CLI options
+---
 
-```
-python main.py --now          # Run pipeline immediately
-python main.py --dry-run      # Run pipeline, skip YouTube upload
-python main.py --newcomer     # Force newcomer audience type
-python main.py --explorer     # Force explorer audience type
-python main.py --analytics    # Run analytics collection only
-```
+## For a fresh Claude reading this cold
+
+Read in order: this README → `data/ROADMAP.md` (architecture, the "honest risks"
+section, why each decision was made) → `data/AUTONOMOUS_GUIDE.md` (ops) →
+`data/learning_log.md` (what's been tried). Entry point: `orchestrator.py::run_pipeline`.
+Every `agents/*.py` has a module docstring explaining its role. Built in phases 1–6,
+all complete (ROADMAP §4). Two human touchpoints: script review (`--review`) and
+mismatch fix (`--fix`).
