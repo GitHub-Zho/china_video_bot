@@ -102,6 +102,32 @@ class CreativeBrief:
             ],
         }
 
+    @classmethod
+    def from_metadata_dict(cls, d: dict) -> "CreativeBrief":
+        """Rebuild a brief from a (possibly human-edited) metadata/brief dict."""
+        scenes = [
+            ScenePlan(
+                index=i,
+                narration=s.get("narration", ""),
+                visual_query=s.get("visual_query", "China travel"),
+                duration=float(s.get("duration", 4.0)),
+                emotion=s.get("emotion", "cinematic"),
+            )
+            for i, s in enumerate(d.get("scenes", []))
+        ]
+        return cls(
+            title=d.get("title", "Discover China"),
+            description=d.get("description", ""),
+            tags=d.get("tags", ["China", "Travel"]),
+            topic=d.get("topic", "China travel"),
+            audience_type=d.get("audience_type", "explorer"),
+            mood=d.get("mood", "cinematic"),
+            hook=d.get("hook", scenes[0].narration if scenes else ""),
+            cta=d.get("cta", "Follow for more."),
+            scenes=scenes,
+            target_seconds=float(d.get("target_seconds", 32)),
+        )
+
 
 # ── Loaders: analytics insights + human-curated guidelines ────────────────────
 

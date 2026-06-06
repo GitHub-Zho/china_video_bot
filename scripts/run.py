@@ -42,6 +42,10 @@ def main() -> int:
                         help="Name of a saved StyleProfile to imitate")
     parser.add_argument("--learn-style", nargs=2, metavar=("SOURCE", "NAME"), default=None,
                         help="Analyse a reference video (file or URL) and save it as a named style, then exit")
+    parser.add_argument("--review", action="store_true",
+                        help="Generate the SCRIPT only and stop for approval (edit brief.json, then --from-brief)")
+    parser.add_argument("--from-brief", metavar="BRIEF_JSON", default=None,
+                        help="Build a video from an approved/edited brief.json")
     parser.add_argument("--fix", metavar="VIDEO_ID", default=None,
                         help="Apply a chosen alternative clip to a flagged scene and re-assemble")
     parser.add_argument("--scene", type=int, default=None, help="Scene index to fix (with --fix)")
@@ -51,6 +55,13 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        # Build from an approved/edited script
+        if args.from_brief:
+            from orchestrator import run_pipeline_from_brief
+            result = run_pipeline_from_brief(args.from_brief, dry_run=args.dry_run,
+                                             style=args.style)
+            print(f"\n[run.py] ✅ Done: {result}")
+            return 0 if result else 1
         # Fix mode — swap a scene's clip for a user-picked alternative, re-assemble.
         if args.fix:
             if args.scene is None or args.pick is None:
@@ -84,7 +95,7 @@ def main() -> int:
         else:
             result = run_pipeline(
                 audience_type=args.audience, dry_run=args.dry_run,
-                prompt=args.prompt, style=args.style
+                prompt=args.prompt, style=args.style, review=args.review
             )
 
         if result:

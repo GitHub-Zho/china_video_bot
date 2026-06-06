@@ -223,68 +223,88 @@ def apply_alternative(video_id: str, scene_index: int, pick: int) -> str:
     return paths.get("youtube", "")
 
 
+def _print_script(brief) -> None:
+    """Pretty-print a brief's script for human review."""
+    print(f"\n  ── SCRIPT REVIEW ──  topic: {brief.topic}  ({len(brief.scenes)} scenes)")
+    print(f"  HOOK: {brief.hook}")
+    for s in brief.scenes:
+        print(f"   {s.index}. {s.narration}")
+        print(f"      ↳ visual: {s.visual_query}")
+    print(f"  CTA: {brief.cta}")
+
+
+def _resolve_style(style: str):
+    if not style:
+        return None
+    from agents.style_analyst_agent import load_style
+    sp = load_style(style)
+    if not sp:
+        print(f"  ⚠️  Style '{style}' not found — using defaults")
+        return None
+    h = sp.to_render_hints()
+    print(f"  Style    : '{style}' ({sp.color_mood}, {sp.subtitle_size} subs)")
+    return VideoRenderParams(fontsize_pct=h["fontsize_pct"], subtitle_y=h["subtitle_y"])
+
+
 def run_pipeline(audience_type: str = None, dry_run: bool = False,
-                 prompt: str = "", style: str = "") -> str:
+                 prompt: str = "", style: str = "", review: bool = False) -> str:
     """
     Full pipeline for one video.
+    review=True   → generate the script ONLY, save it for approval, and STOP
+                    before spending API on voice/media/video. Edit the saved
+                    brief.json, then run with --from-brief to build it.
     dry_run=True  → assembles video locally, skips YouTube upload.
     prompt        → free-text creative direction (e.g. "Xi'an Terracotta Warriors").
     style         → name of a saved StyleProfile to imitate (Phase 5).
-    Returns YouTube video_id string (or local mp4 path if dry_run).
     """
     vid = _video_id()
     print(f"\n{'='*55}")
     print(f"  China Video Bot  ·  {vid}")
     print(f"{'='*55}")
 
-    # ── 0. Optional style profile ────────────────────────────
-    render_params = None
-    if style:
-        from agents.style_analyst_agent import load_style
-        sp = load_style(style)
-        if sp:
-            hints = sp.to_render_hints()
-            render_params = VideoRenderParams(
-                fontsize_pct=hints["fontsize_pct"],
-                subtitle_y=hints["subtitle_y"],
-            )
-            print(f"  Style    : '{style}' ({sp.color_mood}, {sp.subtitle_size} subs, "
-                  f"~{sp.avg_clip_seconds}s/shot)")
-        else:
-            print(f"  ⚠️  Style '{style}' not found — using defaults")
+    render_params = _resolve_style(style)
 
     # ── 1. Director: plan the entire video scene-by-scene ────
     print("\n[1/5] Director planning scenes…")
     brief = create_brief(audience_type, prompt=prompt)
-    print(f"      Topic    : {brief.topic}")
-    print(f"      Audience : {brief.audience_type}")
-    print(f"      Scenes   : {len(brief.scenes)} × {brief.scenes[0].duration:.0f}s "
-          f"= {brief.target_seconds:.0f}s target")
+    print(f"      Topic    : {brief.topic}  |  Audience: {brief.audience_type}")
 
-    # Save metadata
     out_dir = Path(OUTPUT_DIR) / vid
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "metadata.json").write_text(
-        json.dumps(brief.to_metadata_dict(), indent=2)
-    )
+    (out_dir / "metadata.json").write_text(json.dumps(brief.to_metadata_dict(), indent=2))
+    (out_dir / "brief.json").write_text(json.dumps(brief.to_metadata_dict(), indent=2))
+
+    # ── Script review gate ───────────────────────────────────
+    if review:
+        _print_script(brief)
+        print(f"\n  📋 Script saved → output/{vid}/brief.json")
+        print(f"     Review/edit the narration + visual_query, then build it with:")
+        print(f"       python scripts/run.py --from-brief output/{vid}/brief.json"
+              f"{' --dry-run' if dry_run else ''}")
+        return str(out_dir / "brief.json")
+
+    return _build_from_brief(vid, brief, dry_run=dry_run, render_params=render_params)
+
+
+def _build_from_brief(vid: str, brief, dry_run: bool = False,
+                      render_params=None) -> str:
+    """Shared build path: Voice → Media → Assemble → QA → Publish."""
+    out_dir = Path(OUTPUT_DIR) / vid
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 2. Voice + Subtitles (BEFORE media — Phase 1) ────────
-    # TTS runs first so we know each scene's exact spoken duration. The video
-    # assembler then sizes each clip to its narration, keeping visuals in sync.
     print("\n[2/5] Generating voiceover + subtitles…")
     narrations = [s.narration for s in brief.scenes]
     audio_path, srt_path, scene_durations = generate_voice_scenes(vid, narrations)
     audio_dur = _probe_duration(audio_path)
     print(f"      Audio: {audio_dur:.1f}s  |  Script: {len(brief.script.split())} words")
 
-    # ── 3. Media: download clips/photos for each scene ───────
+    # ── 3. Media ─────────────────────────────────────────────
     print("\n[3/5] Downloading media…")
     visual_queries = [s.visual_query for s in brief.scenes]
     media_items = download_media(vid, visual_queries)
     if len(media_items) < 2:
-        raise RuntimeError(
-            f"Only {len(media_items)} media item(s) downloaded — check API keys."
-        )
+        raise RuntimeError(f"Only {len(media_items)} media item(s) — check API keys.")
     clips  = sum(1 for m in media_items if m.kind == "clip")
     photos = sum(1 for m in media_items if m.kind == "photo")
     print(f"      {len(media_items)} items ready ({clips} clips, {photos} photos)")
@@ -296,7 +316,7 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False,
                                   scene_durations=scene_durations,
                                   params=render_params)
 
-    # ── Quality check + auto-remediation (Phase 3) ───────────────
+    # ── Quality check + auto-remediation (Phase 3) ───────────
     print("\n  [QC] Running post-generation checks…")
     yt_path = video_paths.get("youtube", "")
     if yt_path:
@@ -313,17 +333,29 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False,
 
     # ── 5. Publish ────────────────────────────────────────────
     print("\n[5/5] Uploading to YouTube…")
-    metadata = brief.to_metadata_dict()
-    yt_id = upload_video(video_paths["youtube"], metadata)
-
-    # Analytics sweep (non-blocking — collects data for videos 3+ days old)
+    yt_id = upload_video(video_paths["youtube"], brief.to_metadata_dict())
     n = run_pending_analytics()
     if n:
         print(f"  [+] Analytics collected for {n} previous video(s)")
-        extract_insights()   # refresh data/insights.json for next Director run
-
+        extract_insights()
     print(f"\n✅ Done!  https://www.youtube.com/watch?v={yt_id}\n")
     return yt_id
+
+
+def run_pipeline_from_brief(brief_path: str, dry_run: bool = False,
+                            style: str = "") -> str:
+    """Build a video from an approved/edited brief.json (the review-gate output)."""
+    from agents.director_agent import CreativeBrief
+    bp = Path(brief_path)
+    if not bp.exists():
+        raise FileNotFoundError(f"Brief not found: {brief_path}")
+    brief = CreativeBrief.from_metadata_dict(json.loads(bp.read_text()))
+    # video_id = the parent folder name if it's an output dir, else a fresh id
+    vid = bp.parent.name if bp.parent.parent.name == OUTPUT_DIR else _video_id()
+    print(f"\n{'='*55}\n  Building from approved brief · {vid}\n{'='*55}")
+    print(f"  Topic: {brief.topic}  ({len(brief.scenes)} scenes)")
+    return _build_from_brief(vid, brief, dry_run=dry_run,
+                             render_params=_resolve_style(style))
 
 
 def run_pipeline_from_folder(

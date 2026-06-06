@@ -1,7 +1,7 @@
 {
-  "version": 4,
+  "version": 5,
   "updated": "2026-06-02",
-  "updated_reason": "Add 'findable footage' rule — Director was inventing claims (e.g. 'foie gras and caviar' with roast duck) that have no matching stock footage, causing image-text mismatches",
+  "updated_reason": "Anti-hallucination: Director invented a fake claim ('roast duck served with foie gras and caviar') to fill the forced 8-scene count on a narrow topic. Add factuality rules + allow fewer scenes when a topic lacks material.",
 
   "do": [
     "Include at least one specific numerical fact per video (years old, km/h, metres tall, cost in USD)",
@@ -15,7 +15,9 @@
     "Keep each narration to 6-10 words — short-form Reels pace, not documentary narration",
     "Target video length: ~32 seconds total (8 scenes × 4s) — every second must earn its place",
     "Every narration MUST describe something that has obvious stock footage: a real place, a well-known dish, or a visible action. The visual_query must be able to actually find that footage on Pexels/Pixabay.",
-    "For a food topic, keep EVERY scene about that food or its setting (the restaurant, the cooking, the ingredients, the street it's on) — do not drift to unrelated luxury items."
+    "For a food topic, keep EVERY scene about that food or its setting (the restaurant, the cooking, the ingredients, the street it's on) — do not drift to unrelated luxury items.",
+    "Only state facts you are confident are TRUE. If you run out of real facts about a narrow topic, repeat a real angle from a fresh visual rather than inventing a new claim.",
+    "It is better to make FEWER scenes (5-6) that are all true and well-matched than to pad to 8 scenes with invented filler."
   ],
 
   "avoid": [
