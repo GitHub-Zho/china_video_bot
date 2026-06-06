@@ -21,12 +21,13 @@ PEXELS_API_KEY      = os.getenv("PEXELS_API_KEY")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
 PIXABAY_API_KEY     = os.getenv("PIXABAY_API_KEY")
 GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY")
+DASHSCOPE_API_KEY   = os.getenv("DASHSCOPE_API_KEY")   # Alibaba Qwen-VL (works in China)
 
 # Vision model for the VERIFICATION layer (independent from Groq generator).
-# flash-lite has the most generous free-tier rate limits (~15 RPM / 1000+ RPD)
-# and is plenty for judging preview thumbnails + QA frames.
-# Swap to a Claude model here if upgrading to paid Anthropic vision later.
+# Provider preference: Qwen (DashScope) if its key is set — China-accessible, no
+# VPN, strong on Chinese food/scenes — else Gemini, else Groq Llama-4 fallback.
 GEMINI_VISION_MODEL = "gemini-2.5-flash-lite"
+QWEN_VISION_MODEL   = "qwen-vl-max"   # DashScope OpenAI-compatible vision model
 
 # === Claude model (haiku = cheapest, fast enough for scripts) ===
 CLAUDE_MODEL = "claude-haiku-3-5"

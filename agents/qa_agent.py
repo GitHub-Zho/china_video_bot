@@ -85,26 +85,26 @@ def _get_video_duration(video_path: str) -> float:
         return 0.0
 
 
+QA_SAMPLE_INTERVAL = 1.5   # seconds — dense full-coverage sampling
+QA_MAX_FRAMES      = 20     # cap payload
+
 def _strategic_timestamps(duration: float, hook_seconds: float = 2.0) -> list[float]:
     """
-    Choose sampling times that cover the most important moments:
-    - 0.5s: hook card content
-    - hook+0.3s: first moment after hook (check transition)
-    - every 4s through the video
-    - last 2s: CTA
+    Dense full-coverage sampling: one frame every QA_SAMPLE_INTERVAL seconds, so
+    no stretch longer than ~1.5s goes unseen — the verifier effectively "reads
+    the whole video" rather than spot-checking a few frames.
     """
-    ts = [0.5]
-    if hook_seconds > 0:
-        ts.append(hook_seconds + 0.3)   # right after hook ends
-    # Body: sample every 4 seconds
-    t = hook_seconds + 4.0
-    while t < duration - 3:
+    ts = [0.5]                                  # inside the hook card
+    t = max(hook_seconds + 0.3, QA_SAMPLE_INTERVAL)
+    while t < duration - 0.3:
         ts.append(round(t, 1))
-        t += 4.0
-    # Near end
-    if duration > 4:
-        ts.append(round(duration - 1.5, 1))
-    return [t for t in ts if 0 <= t < duration]
+        t += QA_SAMPLE_INTERVAL
+    # De-dup + cap (keep evenly spaced if over the cap)
+    ts = sorted(set(t for t in ts if 0 <= t < duration))
+    if len(ts) > QA_MAX_FRAMES:
+        step = len(ts) / QA_MAX_FRAMES
+        ts = [ts[int(i * step)] for i in range(QA_MAX_FRAMES)]
+    return ts
 
 
 # ── Gemini Vision analysis ────────────────────────────────────────────────────

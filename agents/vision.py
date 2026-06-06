@@ -17,7 +17,8 @@ from pathlib import Path
 import requests
 import urllib3
 
-from config.settings import GEMINI_API_KEY, GEMINI_VISION_MODEL
+from config.settings import (GEMINI_API_KEY, GEMINI_VISION_MODEL,
+                             DASHSCOPE_API_KEY, QWEN_VISION_MODEL)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -25,6 +26,7 @@ _ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_VISION_MODEL}:generateContent"
 )
+_QWEN_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 
 # Free Gemini flash tier ≈ 15 requests/min. Throttle to ~1 call / 4.2s so a
 # full video (≈9 vision calls) stays under the limit instead of tripping 429.
@@ -42,8 +44,44 @@ def _throttle():
 
 
 def vision_available() -> bool:
-    """True if the verifier (Gemini) is configured."""
-    return bool(GEMINI_API_KEY)
+    """True if any verifier (Qwen / Gemini / Groq) is configured."""
+    import os
+    return bool(DASHSCOPE_API_KEY or GEMINI_API_KEY or os.getenv("GROQ_API_KEY"))
+
+
+def _qwen_vision(image_paths, prompt, labels, temperature, max_tokens) -> str | None:
+    """Qwen-VL via DashScope (OpenAI-compatible). Primary verifier in China."""
+    if not DASHSCOPE_API_KEY:
+        return None
+    content = [{"type": "text", "text": prompt}]
+    for i, p in enumerate(image_paths):
+        path = Path(p)
+        if not path.exists():
+            continue
+        if labels and i < len(labels):
+            content.append({"type": "text", "text": labels[i]})
+        b64 = base64.b64encode(path.read_bytes()).decode()
+        content.append({"type": "image_url",
+                        "image_url": {"url": f"data:{_mime_for(path)};base64,{b64}"}})
+    payload = {
+        "model": QWEN_VISION_MODEL,
+        "messages": [{"role": "user", "content": content}],
+        "temperature": temperature, "max_tokens": max_tokens,
+    }
+    headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+               "Content-Type": "application/json"}
+    for verify in (True, False):
+        try:
+            r = requests.post(_QWEN_ENDPOINT, headers=headers, json=payload,
+                              timeout=120, verify=verify)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"]
+        except requests.exceptions.SSLError:
+            continue
+        except Exception as e:
+            print(f"  [Vision] Qwen error: {e}")
+            return None
+    return None
 
 
 def _mime_for(path: Path) -> str:
@@ -65,6 +103,18 @@ def analyse_images(image_paths: list[str], prompt: str,
     """
     if not vision_available():
         return None
+
+    # Provider preference: Qwen (DashScope) first — China-accessible, no VPN.
+    if DASHSCOPE_API_KEY:
+        out = _qwen_vision(image_paths, prompt, labels, temperature, max_tokens)
+        if out is not None:
+            return out
+        print("  [Vision] Qwen unavailable — trying Gemini…")
+
+    if not GEMINI_API_KEY:
+        # No Gemini → go straight to Groq fallback
+        print("  [Vision] Falling back to Groq vision (Llama 4 Scout)…")
+        return _groq_vision(image_paths, prompt, labels, temperature, max_tokens)
 
     parts: list[dict] = [{"text": prompt}]
     for i, p in enumerate(image_paths):
