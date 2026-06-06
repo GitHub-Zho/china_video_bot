@@ -77,6 +77,14 @@ def _subtitle_mode() -> str:
 
 # ── Per-item clip generation ───────────────────────────────────────────────────
 
+_XFADE = 0.3   # seconds — gentle fade-in/out on each scene (soft transitions)
+
+def _fade_suffix(duration: float) -> str:
+    """fade-in at start + fade-out at end, preserving total duration."""
+    out_start = max(0.0, duration - _XFADE)
+    return f",fade=t=in:st=0:d={_XFADE},fade=t=out:st={out_start:.2f}:d={_XFADE}"
+
+
 _PAN_DIRECTIONS = [
     # (x_expr, y_expr) for zoompan — 5 different directions
     ("iw/2-(iw/zoom/2)",  "ih/2-(ih/zoom/2)"),    # center zoom
@@ -93,6 +101,7 @@ def _make_clip_from_video(src: str, w: int, h: int, duration: float,
     vf = (
         f"scale={w}:{h}:force_original_aspect_ratio=increase,"
         f"crop={w}:{h},setsar=1"
+        f"{_fade_suffix(duration)}"
     )
     cmd = [
         FFMPEG_BIN, "-y", "-i", src,
@@ -122,6 +131,7 @@ def _make_clip_from_photo(src: str, w: int, h: int, duration: float,
         f"x='{x_expr}':y='{y_expr}':"
         f"d={n_frames}:s={w}x{h}:fps={FPS},"
         f"setsar=1"
+        f"{_fade_suffix(duration)}"
     )
     cmd = [
         FFMPEG_BIN, "-y",
