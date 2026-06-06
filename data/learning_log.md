@@ -162,3 +162,83 @@ None.
 **Status:** ⏳ Monitor — no action taken yet
 
 ---
+
+## [5] 2026-06-02 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 8 issue(s):
+    ⚠️ [subtitle] t=0.5s — Subtitle text is very small and barely visible
+    ⚠️ [subtitle] t=2.3s — Subtitle text is very small and barely visible
+    ⚠️ [subtitle] t=6.0s — Subtitle text is very small and barely visible
+    ⚠️ [subtitle] t=10.0s — Subtitle text is very small and barely visible
+    ⚠️ [subtitle] t=14.0s — Subtitle text is very small and barely visible
+    ⚠️ [subtitle] t=18.0s — Subtitle text is very small and barely visible
+    ⚠️ [subtitle] t=22.0s — Subtitle text is very small and barely visible
+    ⚠️ [subtitle] t=25.2s — Subtitle text is very small and barely visible
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [6] 2026-06-02 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 8 issue(s):
+    ⚠️ [subtitle] t=0.5s — Subtitle text is very large and takes up a significant portion of the frame, potentially obscuring important visual content.
+    ⚠️ [subtitle] t=2.3s — Subtitle text is very large and takes up a significant portion of the frame, potentially obscuring important visual content.
+    ⚠️ [subtitle] t=6.0s — Subtitle text is very large and takes up a significant portion of the frame, potentially obscuring important visual content.
+    ⚠️ [subtitle] t=10.0s — Subtitle text is very large and takes up a significant portion of the frame, potentially obscuring important visual content.
+    ⚠️ [subtitle] t=14.0s — Subtitle text is very large and takes up a significant portion of the frame, potentially obscuring important visual content.
+    ⚠️ [subtitle] t=18.0s — Subtitle text is very large and takes up a significant portion of the frame, potentially obscuring important visual content.
+    ⚠️ [subtitle] t=22.0s — Subtitle text is very large and takes up a significant portion of the frame, potentially obscuring important visual content.
+    ⚠️ [subtitle] t=25.3s — Subtitle text is very large and takes up a significant portion of the frame, potentially obscuring important visual content.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [7] 2026-06-06 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 4 issue(s):
+    ❌ [content] t=14.0s — Narration mentions hidden alleys but footage shows a European-style stone alleyway, not typical of Beijing.
+    ❌ [content] t=18.0s — Narration mentions hoisin sauce and garlic, but the footage shows a street food stall with various meats, not specifically roast duck or the condiments mentioned.
+    ❌ [content] t=22.0s — Narration mentions foie gras and caviar, but the footage shows a platter of cured meats, cheese, and berries, which does not match the description.
+    ❌ [content] t=23.9s — Narration mentions old Beijing neighborhoods, but the footage shows a display that appears to be an exhibition about the Temple of Heaven, not a typical neighborhood scene.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---

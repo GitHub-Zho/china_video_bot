@@ -6,6 +6,28 @@
 
 ---
 
+## ⚠️ 0. CRITICAL: API geo-restrictions (read first)
+
+Both default model providers are **geo-blocked in mainland China**:
+- **Gemini API** returns `400 "User location is not supported"` from China.
+- **Groq API** returns `403 Forbidden` from China.
+
+The pipeline still BUILDS videos when these fail (graceful degradation: dedup
+instead of vision-selection, no QA), but generation (Director) needs Groq and
+verification needs Gemini — so for full quality you must use ONE of:
+
+1. **Run on the Oracle/AWS server** (US/international region) — Groq + Gemini work
+   normally there. The geo-block only affects testing from a China IP. ← simplest
+2. **Use a VPN** when testing locally from China.
+3. **China-native stack (no VPN):** switch generation + verification to a
+   provider that works in China:
+   - LLM (Director): Alibaba Qwen (DashScope) or DeepSeek — both China-accessible.
+   - Vision (verify/QA): **Qwen2.5-VL** via DashScope — excellent on Chinese
+     scenes. `agents/vision.py` is the single swap point for the verifier.
+   Needs an Alibaba DashScope API key (account may require a Chinese phone).
+
+---
+
 ## 1. What this is
 
 A self-driving pipeline that turns a topic into a finished short-form China travel
