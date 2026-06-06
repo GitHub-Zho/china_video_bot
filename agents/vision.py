@@ -85,17 +85,19 @@ def analyse_images(image_paths: list[str], prompt: str,
     import time
     verify = True
     # Retry transient overload (503) / rate-limit (429) with backoff.
-    for attempt in range(4):
+    for attempt in range(3):
         try:
             _throttle()                      # stay under free-tier RPM
             r = requests.post(_ENDPOINT, params={"key": GEMINI_API_KEY},
                               json=payload, timeout=120, verify=verify)
-            if r.status_code in (429, 500, 503) and attempt < 3:
-                wait = 2 ** attempt          # 1, 2, 4 s
+            if r.status_code in (429, 500, 503) and attempt < 2:
+                wait = 2 ** attempt          # 1, 2 s
                 print(f"  [Vision] Gemini {r.status_code} — retry in {wait}s "
-                      f"({attempt+1}/3)")
+                      f"({attempt+1}/2)")
                 time.sleep(wait)
                 continue
+            if r.status_code in (429, 500, 503):
+                break                        # exhausted — fall back to Groq
             r.raise_for_status()
             data = r.json()
             return data["candidates"][0]["content"]["parts"][0]["text"]
@@ -103,12 +105,44 @@ def analyse_images(image_paths: list[str], prompt: str,
             verify = False                   # Mac SSL fallback, retry immediately
             continue
         except Exception as e:
-            if attempt < 3:
-                time.sleep(2 ** attempt)
+            print(f"  [Vision] Gemini error: {e}")
+            break
+
+    # ── Free fallback: Groq Llama 4 Scout vision (different provider) ──────────
+    # When Gemini is rate-limited, Groq's free vision keeps the loop alive.
+    print("  [Vision] Falling back to Groq vision (Llama 4 Scout)…")
+    return _groq_vision(image_paths, prompt, labels, temperature, max_tokens)
+
+
+def _groq_vision(image_paths: list[str], prompt: str,
+                 labels: list[str] | None, temperature: float,
+                 max_tokens: int) -> str | None:
+    """Groq Llama 4 Scout vision — free fallback when Gemini is unavailable."""
+    import os
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from groq import Groq
+        content: list[dict] = [{"type": "text", "text": prompt}]
+        for i, p in enumerate(image_paths):
+            path = Path(p)
+            if not path.exists():
                 continue
-            print(f"  [Vision] Gemini error after retries: {e}")
-            return None
-    return None
+            if labels and i < len(labels):
+                content.append({"type": "text", "text": labels[i]})
+            b64 = base64.b64encode(path.read_bytes()).decode()
+            content.append({"type": "image_url",
+                            "image_url": {"url": f"data:{_mime_for(path)};base64,{b64}"}})
+        resp = Groq(api_key=api_key).chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=[{"role": "user", "content": content}],
+            temperature=temperature, max_tokens=max_tokens,
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        print(f"  [Vision] Groq fallback error: {e}")
+        return None
 
 
 def analyse_images_json(image_paths: list[str], prompt: str,

@@ -112,30 +112,35 @@ def _strategic_timestamps(duration: float, hook_seconds: float = 2.0) -> list[fl
 _QA_PROMPT = """\
 You are a video QA reviewer for short-form China travel videos (Instagram Reels / YouTube Shorts).
 
-Review each frame (labelled with its timestamp) and identify any quality issues.
+Each frame is labelled with its timestamp AND the narration line being spoken over it.
+Identify quality issues, INCLUDING content mismatches.
 
 Check for:
-1. SUBTITLE issues: text not visible, too small to read, positioned too low/high (cut off by platform UI),
-   subtitle still showing when it should have cleared, text overflowing the frame, leaked filter code
-2. HOOK CARD issues: hook text not readable, too much text, text clipped at edges,
-   the transition moment (frames right after the hook should be smooth, not a black frame or freeze)
-3. VISUAL issues: black or corrupted frame, severe blur, wrong aspect ratio, repeated/looping visual
-4. COMPOSITION issues: important content obscured by text overlay
+1. CONTENT MISMATCH (most important): does the footage actually show what the narration says?
+   Example BAD: narration "Beijing roast duck" but the frame shows nuts, cheese, or a ham platter
+   — that is a content mismatch. Narration "city wall" but frame shows a temple — mismatch.
+   Flag clearly off-topic footage as category "content" with severity "error".
+2. SUBTITLE issues: not visible, too small/large, positioned too low/high (cut off by UI),
+   lingering, text overflowing the frame, leaked filter code
+3. HOOK CARD issues: hook text not readable, clipped at edges, or a black/freeze frame right after it
+4. VISUAL issues: black or corrupted frame, severe blur, wrong aspect ratio, obviously repeated footage
 
-Return ONLY a JSON array (can be empty if no issues):
+Return ONLY a JSON array (empty if no issues):
 [
-  {"timestamp_s": 0.5, "severity": "warning", "category": "subtitle",
-   "description": "Subtitle text is very small and barely visible"}
+  {"timestamp_s": 19.6, "severity": "error", "category": "content",
+   "description": "Narration says roast duck but frame shows a platter of nuts/cheese — wrong footage"}
 ]
 
 If everything looks fine, return: []"""
 
 
-def _analyse_frames(frames: list[tuple[float, Path]]) -> tuple[list[QAIssue], bool]:
+def _analyse_frames(frames: list[tuple[float, Path]],
+                    scene_windows: list | None = None) -> tuple[list[QAIssue], bool]:
     """
     Send sampled frames to the verifier (Gemini).
-    Returns (issues, vision_ran). vision_ran=False means the check couldn't run
-    (no key / API error) — so an empty list does NOT mean the video is clean.
+    scene_windows: optional [(start_s, end_s, narration), ...] in video time, so
+    each frame can be labelled with the narration it should match (content check).
+    Returns (issues, vision_ran). vision_ran=False means the check couldn't run.
     """
     from agents.vision import analyse_images_json, vision_available
 
@@ -145,8 +150,22 @@ def _analyse_frames(frames: list[tuple[float, Path]]) -> tuple[list[QAIssue], bo
         print("  [QA] GEMINI_API_KEY not set — skipping Vision check")
         return [], False
 
+    def _narration_at(t: float) -> str:
+        if not scene_windows:
+            return ""
+        for s, e, narr in scene_windows:
+            if s <= t < e:
+                return narr
+        return ""
+
     paths  = [str(p) for _, p in frames]
-    labels = [f"[Frame at t={t:.1f}s]" for t, _ in frames]
+    labels = []
+    for t, _ in frames:
+        narr = _narration_at(t)
+        if narr:
+            labels.append(f'[Frame t={t:.1f}s — narration: "{narr}"]')
+        else:
+            labels.append(f"[Frame t={t:.1f}s]")
     data   = analyse_images_json(paths, _QA_PROMPT, labels)
 
     if data is None:
@@ -240,13 +259,16 @@ def qa_check(
     video_path: str,
     hook_seconds: float = 2.0,
     use_vision: bool = True,
+    scene_windows: list | None = None,
 ) -> QAReport:
     """
     Run QA on a finished video. Returns a QAReport.
 
     hook_seconds: duration of the hook card prepended to the video (default 2s).
     use_vision:   if True, sends frames to Gemini Vision for content analysis.
-                  Set False to skip API cost (frame extraction still runs).
+    scene_windows: optional [(start_s, end_s, narration), ...] in VIDEO time
+                  (including hook offset) so QA can flag content mismatches
+                  (footage that doesn't match the narration).
     """
     report = QAReport(video_path=video_path)
     print(f"  [QA] Checking: {Path(video_path).name}")
@@ -276,7 +298,7 @@ def qa_check(
 
     vision_ran = False
     if use_vision:
-        issues, vision_ran = _analyse_frames(frames)
+        issues, vision_ran = _analyse_frames(frames, scene_windows)
         for issue in issues:
             report.add(issue)
 

@@ -90,17 +90,39 @@ def _quality_check(video_path: str, audio_path: str,
     return ok
 
 
-def _qa_and_remediate(vid: str, video_paths: dict) -> None:
+def _scene_windows(brief, scene_durations: list[float]) -> list:
+    """Build [(start_s, end_s, narration), ...] in VIDEO time (after the hook)
+    so QA can match each frame to the narration it should depict."""
+    windows = []
+    t = HOOK_CARD_SECONDS
+    for i, scene in enumerate(brief.scenes):
+        dur = scene_durations[i] if i < len(scene_durations) else 4.0
+        windows.append((round(t, 2), round(t + dur, 2), scene.narration))
+        t += dur
+    return windows
+
+
+def _qa_and_remediate(vid: str, video_paths: dict, scene_windows: list | None = None) -> None:
     """
-    Phase 3 — QA the video, and if the verifier flags fixable subtitle issues,
-    adjust render params for THIS video and re-burn subtitles on both variants
-    (no full re-render). Bounded to one remediation pass.
+    Phase 3 — QA the video (incl. content-mismatch detection), and if the
+    verifier flags fixable subtitle issues, adjust render params for THIS video
+    and re-burn subtitles on both variants. Bounded to one remediation pass.
+    Content mismatches are logged for review (can't be auto-fixed by re-burning).
     """
     yt_path = video_paths.get("youtube", "")
     if not yt_path:
         return
 
-    report = qa_check(yt_path, hook_seconds=HOOK_CARD_SECONDS)
+    report = qa_check(yt_path, hook_seconds=HOOK_CARD_SECONDS,
+                      scene_windows=scene_windows)
+
+    # Surface content mismatches prominently (footage ≠ narration)
+    mism = [i for i in report.issues if i.category == "content"]
+    if mism:
+        print(f"  [QC] ⚠️  {len(mism)} content mismatch(es) — footage doesn't match narration:")
+        for i in mism:
+            print(f"        • t={i.timestamp_s:.1f}s: {i.description}")
+        print("        (logged for review — stock library may lack this footage)")
 
     params = VideoRenderParams()
     new_params, changed = adjust_params_from_qa(report, params)
@@ -196,7 +218,8 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False,
     yt_path = video_paths.get("youtube", "")
     if yt_path:
         _quality_check(yt_path, audio_path, hook_seconds=HOOK_CARD_SECONDS)
-        _qa_and_remediate(vid, video_paths)
+        _qa_and_remediate(vid, video_paths,
+                          scene_windows=_scene_windows(brief, scene_durations))
 
     if dry_run:
         print(f"\n✅ DRY RUN — videos saved locally (not uploaded):")
@@ -293,7 +316,8 @@ def run_pipeline_from_folder(
     yt_path = video_paths.get("youtube", "")
     if yt_path:
         _quality_check(yt_path, audio_path, hook_seconds=HOOK_CARD_SECONDS)
-        _qa_and_remediate(vid, video_paths)
+        _qa_and_remediate(vid, video_paths,
+                          scene_windows=_scene_windows(brief, scene_durations))
 
     if dry_run:
         print(f"\n✅ DRY RUN — videos saved locally:")

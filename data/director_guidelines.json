@@ -1,7 +1,7 @@
 {
-  "version": 3,
-  "updated": "2026-06-01",
-  "updated_reason": "Added platform technical standards + QA rules as permanent guidelines",
+  "version": 4,
+  "updated": "2026-06-02",
+  "updated_reason": "Add 'findable footage' rule — Director was inventing claims (e.g. 'foie gras and caviar' with roast duck) that have no matching stock footage, causing image-text mismatches",
 
   "do": [
     "Include at least one specific numerical fact per video (years old, km/h, metres tall, cost in USD)",
@@ -13,7 +13,9 @@
     "Visual queries must include: location + time of day + lighting condition + ONE emotional detail (e.g. 'mist rising', 'golden light', 'empty streets')",
     "Visual queries must be cinematic and specific — imagine describing a shot to a film director, not a search engine",
     "Keep each narration to 6-10 words — short-form Reels pace, not documentary narration",
-    "Target video length: ~32 seconds total (8 scenes × 4s) — every second must earn its place"
+    "Target video length: ~32 seconds total (8 scenes × 4s) — every second must earn its place",
+    "Every narration MUST describe something that has obvious stock footage: a real place, a well-known dish, or a visible action. The visual_query must be able to actually find that footage on Pexels/Pixabay.",
+    "For a food topic, keep EVERY scene about that food or its setting (the restaurant, the cooking, the ingredients, the street it's on) — do not drift to unrelated luxury items."
   ],
 
   "avoid": [
@@ -24,7 +26,9 @@
     "Ending sentences with 'always', 'every time', 'completely' — unnatural filler words",
     "Repeating the same location across multiple scenes — each scene must be a different place",
     "Visual queries that are just city names — 'China Shanghai skyline' tells a stock footage site nothing useful",
-    "CTA lines that say 'discover the secrets' — replace with something specific like 'More places like this. Follow us.'"
+    "CTA lines that say 'discover the secrets' — replace with something specific like 'More places like this. Follow us.'",
+    "Claims with NO findable stock footage — e.g. 'served with foie gras and caviar', 'paired with rare wine'. If you can't picture the exact shot existing on a stock site, don't write it.",
+    "Drifting off-topic: in a roast-duck video, never mention unrelated foods/luxury — the footage won't match and it breaks immersion."
   ],
 
   "style_notes": [
