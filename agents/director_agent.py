@@ -56,10 +56,15 @@ class BriefValidationError(Exception):
 @dataclass
 class ScenePlan:
     index:        int
-    narration:    str     # spoken words for this scene (8-18 words)
-    visual_query: str     # precise footage search query
-    duration:     float   # target seconds (3-7)
+    narration:    str     # spoken words for this scene
+    visual_query: str     # rich cinematic description (used to JUDGE footage match)
+    duration:     float   # target seconds
     emotion:      str     # cinematic | energetic | serene | dramatic | warm
+    search_query: str = ""  # 2-4 plain keywords for stock SEARCH (the subject/dish/action)
+
+    def stock_query(self) -> str:
+        """Keyword query for stock sites — falls back to visual_query."""
+        return self.search_query.strip() or self.visual_query
 
 
 @dataclass
@@ -104,7 +109,7 @@ class CreativeBrief:
             "target_seconds": self.target_seconds,
             "scenes": [
                 {"index": s.index, "narration": s.narration,
-                 "visual_query": s.visual_query,
+                 "visual_query": s.visual_query, "search_query": s.search_query,
                  "duration": s.duration, "emotion": s.emotion}
                 for s in self.scenes
             ],
@@ -120,6 +125,7 @@ class CreativeBrief:
                 visual_query=s.get("visual_query", "China travel"),
                 duration=float(s.get("duration", 4.0)),
                 emotion=s.get("emotion", "cinematic"),
+                search_query=s.get("search_query", ""),
             )
             for i, s in enumerate(d.get("scenes", []))
         ]
@@ -253,7 +259,8 @@ Return ONLY valid JSON — no markdown, no explanation:
   "scenes": [
     {{
       "narration": "...(6-10 words, punchy, leaves viewer wanting more)",
-      "visual_query": "...(10-15 words, location + mood + time of day + motion detail)",
+      "visual_query": "...(rich cinematic description, used to judge footage match)",
+      "search_query": "...(2-4 PLAIN keywords a stock-video site will match — the SUBJECT/dish/action only. For food, describe the COOKED DISH: e.g. 'roasted duck dish food', 'sliced peking duck plate'. NEVER bare 'duck' (returns live ducks), NEVER place names like 'Nanluogu Xiang' (stock has none).)",
       "duration": {secs_per_scene},
       "emotion": "cinematic|energetic|serene|dramatic|warm"
     }},
@@ -474,6 +481,7 @@ def _generate_brief_via_groq(
             visual_query=s.get("visual_query", "China landscape travel"),
             duration=float(s.get("duration", secs_per)),
             emotion=s.get("emotion", "cinematic"),
+            search_query=s.get("search_query", ""),
         )
         for i, s in enumerate(raw_scenes)
     ]

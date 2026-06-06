@@ -316,8 +316,9 @@ def _build_from_brief(vid: str, brief, dry_run: bool = False,
 
     # ── 3. Media ─────────────────────────────────────────────
     print("\n[3/5] Downloading media…")
-    visual_queries = [s.visual_query for s in brief.scenes]
-    media_items = download_media(vid, visual_queries)
+    search_queries = [s.stock_query() for s in brief.scenes]   # plain keywords for search
+    match_descs    = [s.visual_query for s in brief.scenes]     # rich text to judge match
+    media_items = download_media(vid, search_queries, match_descriptions=match_descs)
     if len(media_items) < 2:
         raise RuntimeError(f"Only {len(media_items)} media item(s) — check API keys.")
     clips  = sum(1 for m in media_items if m.kind == "clip")

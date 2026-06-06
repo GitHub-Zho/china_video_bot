@@ -280,21 +280,30 @@ def download_scene_alternatives(video_id: str, scene_index: int, query: str,
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-def download_media(video_id: str, queries: list[str]) -> list[MediaItem]:
+def download_media(video_id: str, queries: list[str],
+                   match_descriptions: list[str] | None = None) -> list[MediaItem]:
     """
-    Download one media item per query. Tries video clip first, photo as fallback.
-    Returns list of MediaItem(path, kind).
-    Resume-safe: skips already-downloaded files.
+    Download one media item per scene.
+
+    queries:            SHORT keyword queries for the stock SEARCH (the subject/
+                        dish/action). Keep these plain — stock sites are keyword
+                        matchers, not semantic search.
+    match_descriptions: optional richer per-scene descriptions used only to JUDGE
+                        which candidate fits best (Gemini vision-pick). Falls back
+                        to the search query.
+    Resume-safe; tries clip first, photo fallback.
     """
     out_dir = Path(OUTPUT_DIR) / video_id / "media"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     items: list[MediaItem] = []
     target = queries[:IMAGES_PER_VIDEO]
-    used_video_ids: set = set()   # dedup: never use the same Pexels clip twice
+    used_video_ids: set = set()   # dedup: never use the same clip twice
 
     for i, query in enumerate(target):
         china_q = f"China {query}" if "china" not in query.lower() else query
+        judge_q = (match_descriptions[i] if match_descriptions and i < len(match_descriptions)
+                   else china_q)
 
         # Check resume: clip takes priority if both exist
         clip_path  = out_dir / f"{i:02d}.mp4"
@@ -319,7 +328,7 @@ def download_media(video_id: str, queries: list[str]) -> list[MediaItem]:
         # Vision picks the best-matching fresh candidate; falls back to first.
         pick = None
         if fresh:
-            best = _pick_best_candidate(fresh, china_q)
+            best = _pick_best_candidate(fresh, judge_q)
             pick = best if best else fresh[0]
             if best:
                 print("(vision-picked) ", end="")
