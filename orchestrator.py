@@ -102,27 +102,64 @@ def _scene_windows(brief, scene_durations: list[float]) -> list:
     return windows
 
 
-def _qa_and_remediate(vid: str, video_paths: dict, scene_windows: list | None = None) -> None:
+def _save_render_state(vid: str, brief, scene_durations: list[float]) -> None:
+    """Persist what's needed to re-assemble after a manual scene swap."""
+    state = {
+        "hook": brief.hook,
+        "scene_durations": scene_durations,
+        "visual_queries": [s.visual_query for s in brief.scenes],
+        "narrations": [s.narration for s in brief.scenes],
+    }
+    (Path(OUTPUT_DIR) / vid / "render_state.json").write_text(json.dumps(state, indent=2))
+
+
+def _qa_and_remediate(vid: str, video_paths: dict, brief=None,
+                      scene_durations: list[float] | None = None) -> None:
     """
-    Phase 3 — QA the video (incl. content-mismatch detection), and if the
-    verifier flags fixable subtitle issues, adjust render params for THIS video
-    and re-burn subtitles on both variants. Bounded to one remediation pass.
-    Content mismatches are logged for review (can't be auto-fixed by re-burning).
+    Phase 3 — QA the video (incl. content-mismatch detection). On fixable subtitle
+    issues, auto-adjust params and re-burn. On CONTENT mismatches (footage ≠
+    narration), download 3 alternative clips per bad scene so the user can pick a
+    better one, and write a review.json describing how to apply the fix.
     """
     yt_path = video_paths.get("youtube", "")
     if not yt_path:
         return
 
+    scene_windows = (_scene_windows(brief, scene_durations)
+                     if (brief and scene_durations) else None)
     report = qa_check(yt_path, hook_seconds=HOOK_CARD_SECONDS,
                       scene_windows=scene_windows)
 
-    # Surface content mismatches prominently (footage ≠ narration)
+    # ── Content mismatches → download alternatives for human pick ─────────────
     mism = [i for i in report.issues if i.category == "content"]
-    if mism:
-        print(f"  [QC] ⚠️  {len(mism)} content mismatch(es) — footage doesn't match narration:")
-        for i in mism:
-            print(f"        • t={i.timestamp_s:.1f}s: {i.description}")
-        print("        (logged for review — stock library may lack this footage)")
+    if mism and brief and scene_windows:
+        from agents.media_agent import download_scene_alternatives
+        print(f"  [QC] ⚠️  {len(mism)} content mismatch(es) — fetching alternatives to pick from:")
+        review = []
+        done_scenes = set()
+        for issue in mism:
+            # map timestamp → scene index via the windows
+            idx = next((k for k, (s, e, _) in enumerate(scene_windows)
+                        if s <= issue.timestamp_s < e), None)
+            if idx is None or idx in done_scenes:
+                continue
+            done_scenes.add(idx)
+            print(f"        • scene {idx}: {issue.description}")
+            alts = download_scene_alternatives(
+                vid, idx, brief.scenes[idx].visual_query, n=3)
+            review.append({
+                "scene_index": idx,
+                "narration": brief.scenes[idx].narration,
+                "issue": issue.description,
+                "current_clip": f"media/{idx:02d}.mp4",
+                "alternatives": [a["preview"].split(f"{vid}/")[-1] for a in alts],
+                "apply_command": f"python scripts/run.py --fix {vid} --scene {idx} --pick <0-{len(alts)-1}>",
+            })
+        if review:
+            (Path(OUTPUT_DIR) / vid / "review.json").write_text(
+                json.dumps(review, indent=2))
+            print(f"  [QC] 📋 Review {len(review)} scene(s): open output/{vid}/alternatives/"
+                  f" and run the --fix command in output/{vid}/review.json")
 
     params = VideoRenderParams()
     new_params, changed = adjust_params_from_qa(report, params)
@@ -138,6 +175,52 @@ def _qa_and_remediate(vid: str, video_paths: dict, scene_windows: list | None = 
         rerender_subtitles(vid, variant, new_params, hook_seconds=HOOK_CARD_SECONDS)
     print("  [QC] ✅ Remediation applied")
     cleanup_raw(vid)
+
+
+def apply_alternative(video_id: str, scene_index: int, pick: int) -> str:
+    """
+    Swap a scene's clip for a user-chosen alternative and re-assemble the video.
+    `pick` is the alt_N index shown in output/{vid}/review.json.
+    Returns the new youtube path.
+    """
+    from agents.media_agent import MediaItem
+    import shutil
+
+    base = Path(OUTPUT_DIR) / video_id
+    state_f = base / "render_state.json"
+    if not state_f.exists():
+        raise FileNotFoundError(f"No render_state.json for {video_id} — can't re-assemble.")
+    state = json.loads(state_f.read_text())
+
+    chosen = base / "alternatives" / f"scene_{scene_index:02d}" / f"alt_{pick}.mp4"
+    target = base / "media" / f"{scene_index:02d}.mp4"
+    if not chosen.exists():
+        raise FileNotFoundError(f"Alternative not found: {chosen}")
+
+    print(f"  [Fix] Scene {scene_index}: swapping in alt_{pick} → {target.name}")
+    shutil.copy(chosen, target)
+
+    # Rebuild media list from the media/ folder (order = scene order)
+    media_items = []
+    for i in range(len(state["scene_durations"])):
+        clip = base / "media" / f"{i:02d}.mp4"
+        photo = base / "media" / f"{i:02d}.jpg"
+        if clip.exists():
+            media_items.append(MediaItem(str(clip), "clip"))
+        elif photo.exists():
+            media_items.append(MediaItem(str(photo), "photo"))
+
+    # Remove old finals so assemble_video rebuilds them
+    for f in ("youtube.mp4", "reels.mp4", "youtube_raw.mp4", "reels_raw.mp4"):
+        (base / f).unlink(missing_ok=True)
+
+    print("  [Fix] Re-assembling video…")
+    paths = assemble_video(video_id, media_items,
+                           str(base / "audio.mp3"), str(base / "subtitles.srt"),
+                           hook_text=state.get("hook", ""),
+                           scene_durations=state["scene_durations"])
+    print(f"  [Fix] ✅ Rebuilt: {paths.get('youtube')}")
+    return paths.get("youtube", "")
 
 
 def run_pipeline(audience_type: str = None, dry_run: bool = False,
@@ -218,8 +301,9 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False,
     yt_path = video_paths.get("youtube", "")
     if yt_path:
         _quality_check(yt_path, audio_path, hook_seconds=HOOK_CARD_SECONDS)
-        _qa_and_remediate(vid, video_paths,
-                          scene_windows=_scene_windows(brief, scene_durations))
+        _save_render_state(vid, brief, scene_durations)
+        _qa_and_remediate(vid, video_paths, brief=brief,
+                          scene_durations=scene_durations)
 
     if dry_run:
         print(f"\n✅ DRY RUN — videos saved locally (not uploaded):")
@@ -316,8 +400,9 @@ def run_pipeline_from_folder(
     yt_path = video_paths.get("youtube", "")
     if yt_path:
         _quality_check(yt_path, audio_path, hook_seconds=HOOK_CARD_SECONDS)
-        _qa_and_remediate(vid, video_paths,
-                          scene_windows=_scene_windows(brief, scene_durations))
+        _save_render_state(vid, brief, scene_durations)
+        _qa_and_remediate(vid, video_paths, brief=brief,
+                          scene_durations=scene_durations)
 
     if dry_run:
         print(f"\n✅ DRY RUN — videos saved locally:")

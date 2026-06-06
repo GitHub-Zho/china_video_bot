@@ -223,6 +223,61 @@ def _pick_best_candidate(candidates: list[dict], query: str) -> dict | None:
         shutil.rmtree(prev_dir, ignore_errors=True)
 
 
+# ── Scene alternatives (human-in-the-loop mismatch fix) ───────────────────────
+
+def download_scene_alternatives(video_id: str, scene_index: int, query: str,
+                                n: int = 3) -> list[dict]:
+    """
+    When QA flags a content mismatch for a scene, download N ALTERNATIVE clips
+    for that scene's query so the user can pick a better match.
+
+    Saves into output/{vid}/alternatives/scene_{i:02d}/:
+        alt_0.mp4 / alt_0.jpg (preview), alt_1.mp4 / alt_1.jpg, ...
+    Skips any clip identical (same bytes) to the scene's current media.
+    Returns [{"index":k, "clip":path, "preview":path}, ...].
+    """
+    import hashlib
+    china_q = f"China {query}" if "china" not in query.lower() else query
+    alt_dir = Path(OUTPUT_DIR) / video_id / "alternatives" / f"scene_{scene_index:02d}"
+    alt_dir.mkdir(parents=True, exist_ok=True)
+
+    # Hash of the clip currently used for this scene (to exclude it)
+    cur = Path(OUTPUT_DIR) / video_id / "media" / f"{scene_index:02d}.mp4"
+    cur_hash = (hashlib.md5(cur.read_bytes()).hexdigest()
+                if cur.exists() else None)
+
+    candidates = (_search_pexels_video_candidates(china_q, n=10) +
+                  _search_pixabay_video_candidates(china_q, n=6))
+
+    out, seen = [], set()
+    for c in candidates:
+        if len(out) >= n:
+            break
+        if c["id"] in seen:
+            continue
+        seen.add(c["id"])
+        data = _download_bytes(c["url"])
+        if not data or len(data) < 50_000:
+            continue
+        if cur_hash and hashlib.md5(data).hexdigest() == cur_hash:
+            continue   # this is the clip we already used — skip
+        k = len(out)
+        clip_path = alt_dir / f"alt_{k}.mp4"
+        clip_path.write_bytes(data)
+        # preview thumbnail (first frame) for quick eyeballing
+        prev_path = alt_dir / f"alt_{k}.jpg"
+        from config.settings import FFMPEG_BIN
+        import subprocess
+        subprocess.run([FFMPEG_BIN, "-y", "-ss", "1", "-i", str(clip_path),
+                        "-frames:v", "1", "-vf", "scale=480:-1", str(prev_path)],
+                       capture_output=True)
+        out.append({"index": k, "clip": str(clip_path), "preview": str(prev_path)})
+        time.sleep(IMAGE_DOWNLOAD_DELAY)
+
+    print(f"      Scene {scene_index}: {len(out)} alternative(s) → {alt_dir}")
+    return out
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def download_media(video_id: str, queries: list[str]) -> list[MediaItem]:

@@ -42,11 +42,25 @@ def main() -> int:
                         help="Name of a saved StyleProfile to imitate")
     parser.add_argument("--learn-style", nargs=2, metavar=("SOURCE", "NAME"), default=None,
                         help="Analyse a reference video (file or URL) and save it as a named style, then exit")
+    parser.add_argument("--fix", metavar="VIDEO_ID", default=None,
+                        help="Apply a chosen alternative clip to a flagged scene and re-assemble")
+    parser.add_argument("--scene", type=int, default=None, help="Scene index to fix (with --fix)")
+    parser.add_argument("--pick", type=int, default=None, help="Alternative index to use (with --fix)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Assemble locally, skip YouTube upload")
     args = parser.parse_args()
 
     try:
+        # Fix mode — swap a scene's clip for a user-picked alternative, re-assemble.
+        if args.fix:
+            if args.scene is None or args.pick is None:
+                print("[run.py] --fix needs --scene N --pick K (see output/<id>/review.json)")
+                return 1
+            from orchestrator import apply_alternative
+            out = apply_alternative(args.fix, args.scene, args.pick)
+            print(f"\n[run.py] ✅ Fixed scene {args.scene}: {out}")
+            return 0 if out else 1
+
         # Style learning mode — analyse a reference, save profile, exit.
         if args.learn_style:
             from agents.style_analyst_agent import analyse_style
