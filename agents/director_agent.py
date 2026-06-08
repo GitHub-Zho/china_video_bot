@@ -260,7 +260,7 @@ Return ONLY valid JSON — no markdown, no explanation:
     {{
       "narration": "...(6-10 words, punchy, leaves viewer wanting more)",
       "visual_query": "...(rich cinematic description, used to judge footage match)",
-      "search_query": "...(2-4 PLAIN keywords a stock-video site will match — the SUBJECT/dish/action only. For food, describe the COOKED DISH: e.g. 'roasted duck dish food', 'sliced peking duck plate'. NEVER bare 'duck' (returns live ducks), NEVER place names like 'Nanluogu Xiang' (stock has none).)",
+      "search_query": "...(2-4 PLAIN keywords a stock-video site will match — the SUBJECT/dish/action only, ALWAYS naming the food. For food, describe the COOKED DISH: e.g. 'roasted duck dish food', 'sliced roast duck plate', 'roast duck restaurant'. NEVER bare 'duck' (returns live ducks). NEVER ambiguous words like 'carving'/'carving tradition' (returns STONE carving) — say 'sliced roast duck' instead. NEVER place names like 'Nanluogu Xiang' (stock has none). Always include the food word in EVERY scene's query.)",
       "duration": {secs_per_scene},
       "emotion": "cinematic|energetic|serene|dramatic|warm"
     }},

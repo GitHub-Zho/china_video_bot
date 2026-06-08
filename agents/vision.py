@@ -43,6 +43,18 @@ def _throttle():
     _last_call_ts = time.time()
 
 
+def provider_name() -> str:
+    """Name of the active verifier (for logging)."""
+    import os
+    if DASHSCOPE_API_KEY:
+        return "Qwen-VL"
+    if GEMINI_API_KEY:
+        return "Gemini"
+    if os.getenv("GROQ_API_KEY"):
+        return "Groq"
+    return "none"
+
+
 def vision_available() -> bool:
     """True if any verifier (Qwen / Gemini / Groq) is configured."""
     import os

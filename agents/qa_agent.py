@@ -294,7 +294,8 @@ def qa_check(
         report.print_summary()
         return report
 
-    print(f"  [QA] Extracted {len(frames)} frame(s) — sending to Gemini Vision…")
+    from agents.vision import provider_name
+    print(f"  [QA] Extracted {len(frames)} frame(s) — reading with {provider_name()}…")
 
     vision_ran = False
     if use_vision:
