@@ -82,6 +82,10 @@ class CreativeBrief:
     # Scene plan
     scenes:        list[ScenePlan]
     target_seconds: float
+    topic_label:   str = ""   # short 2-3 word badge shown top-left, e.g. "BEIJING DUCK"
+
+    def label(self) -> str:
+        return (self.topic_label or self.topic or "").strip()
 
     @property
     def script(self) -> str:
@@ -107,6 +111,7 @@ class CreativeBrief:
             "script":        self.script,
             "image_queries": self.image_queries,
             "target_seconds": self.target_seconds,
+            "topic_label":   self.topic_label,
             "scenes": [
                 {"index": s.index, "narration": s.narration,
                  "visual_query": s.visual_query, "search_query": s.search_query,
@@ -140,6 +145,7 @@ class CreativeBrief:
             cta=d.get("cta", "Follow for more."),
             scenes=scenes,
             target_seconds=float(d.get("target_seconds", 32)),
+            topic_label=d.get("topic_label", ""),
         )
 
 
@@ -256,6 +262,7 @@ Return ONLY valid JSON — no markdown, no explanation:
   "mood": "cinematic|energetic|serene|dramatic",
   "hook": "...(6-10 word question or tension-starter)",
   "cta": "...",
+  "topic_label": "...(2-3 word UPPERCASE badge naming the subject, e.g. 'BEIJING ROAST DUCK', 'GUILIN')",
   "scenes": [
     {{
       "narration": "...(6-10 words, punchy, leaves viewer wanting more)",
@@ -497,6 +504,7 @@ def _generate_brief_via_groq(
         cta=data.get("cta", "Follow for more."),
         scenes=scenes,
         target_seconds=target_seconds,
+        topic_label=data.get("topic_label", ""),
     )
 
     # Validate word counts — flag both too-short and too-long narrations.

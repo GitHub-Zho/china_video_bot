@@ -130,7 +130,7 @@ def _reassemble_from_media(vid: str, brief, scene_durations: list[float]) -> Non
         (base / f).unlink(missing_ok=True)
     assemble_video(vid, media_items, str(base / "audio.mp3"),
                    str(base / "subtitles.srt"), hook_text=brief.hook,
-                   scene_durations=scene_durations)
+                   scene_durations=scene_durations, corner_label=brief.label())
 
 
 def _qa_and_remediate(vid: str, video_paths: dict, brief=None,
@@ -349,7 +349,8 @@ def _build_from_brief(vid: str, brief, dry_run: bool = False,
     video_paths = assemble_video(vid, media_items, audio_path, srt_path,
                                   hook_text=brief.hook,
                                   scene_durations=scene_durations,
-                                  params=render_params)
+                                  params=render_params,
+                                  corner_label=brief.label())
 
     # ── Quality check + auto-remediation (Phase 3) ───────────
     print("\n  [QC] Running post-generation checks…")
@@ -460,7 +461,8 @@ def run_pipeline_from_folder(
     video_paths = assemble_video(vid, media_items, audio_path, srt_path,
                                   hook_text=brief.hook,
                                   scene_durations=scene_durations,
-                                  params=render_params)
+                                  params=render_params,
+                                  corner_label=brief.label())
 
     # ── Quality check + auto-remediation (Phase 3) ───────────────
     print("\n  [QC] Running post-generation checks…")

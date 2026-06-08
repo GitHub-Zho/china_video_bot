@@ -116,10 +116,12 @@ Each frame is labelled with its timestamp AND the narration line being spoken ov
 Identify quality issues, INCLUDING content mismatches.
 
 Check for:
-1. CONTENT MISMATCH (most important): does the footage actually show what the narration says?
-   Example BAD: narration "Beijing roast duck" but the frame shows nuts, cheese, or a ham platter
-   — that is a content mismatch. Narration "city wall" but frame shows a temple — mismatch.
-   Flag clearly off-topic footage as category "content" with severity "error".
+1. CONTENT MISMATCH (most important): does the footage CLEARLY show the SPECIFIC subject
+   the narration names? Be STRICT. If the narration says "Beijing roast duck" but the frame
+   shows generic roast meat / char siu / a plate you can't confidently identify as roast DUCK,
+   that IS a mismatch — the viewer must be able to tell it's the specific subject. Narration
+   "city wall" but frame shows a temple → mismatch. Stone carving for "duck carving" → mismatch.
+   Flag anything not CLEARLY the named subject as category "content", severity "error".
 2. SUBTITLE issues: not visible, too small/large, positioned too low/high (cut off by UI),
    lingering, text overflowing the frame, leaked filter code
 3. HOOK CARD issues: hook text not readable, clipped at edges, or a black/freeze frame right after it

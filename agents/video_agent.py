@@ -182,16 +182,32 @@ def _shift_srt(srt_path: str, offset_ms: int) -> str:
 
 # ── Subtitle burn ─────────────────────────────────────────────────────────────
 
+def _corner_label_filter(text: str, video_w: int, video_h: int, tmp_dir: Path) -> str:
+    """A small persistent topic badge in the top-left, on every frame, so a viewer
+    always knows what the video is about (e.g. 'BEIJING ROAST DUCK')."""
+    if not text:
+        return ""
+    font = _caption_font()
+    font_arg = f"fontfile={font.replace(':', chr(92)+':')}:" if font else ""
+    fs = max(20, int(video_h * 0.026))
+    pad = int(video_w * 0.03)
+    lf = tmp_dir / "label.txt"
+    lf.write_text(text.upper().strip(), encoding="utf-8")
+    tf = str(lf).replace(":", "\\:")
+    return (f",drawtext={font_arg}fontsize={fs}:fontcolor=white:borderw=2:"
+            f"bordercolor=black@0.9:box=1:boxcolor=black@0.55:boxborderw=10:"
+            f"x={pad}:y={pad}:textfile={tf}")
+
+
 def _burn_subtitles(raw_path: str, audio_path: str,
                     srt_path: str, out_path: str,
                     subtitle_offset_ms: int = 0,
                     video_w: int = 1920, video_h: int = 1080,
-                    params: VideoRenderParams | None = None) -> None:
+                    params: VideoRenderParams | None = None,
+                    corner_label: str = "") -> None:
     """Attach audio + burn subtitles: raw video → final MP4.
 
-    subtitle_offset_ms: shift timestamps forward (hook card prepended).
-    video_w / video_h:  actual output dimensions — subtitle size scales with these.
-    params:             per-video render params (font size / position / cue cap).
+    corner_label: persistent topic badge (top-left) shown on the whole video.
     """
     if params is None:
         params = VideoRenderParams()
@@ -215,8 +231,11 @@ def _burn_subtitles(raw_path: str, audio_path: str,
         else:
             print("  [Video] ⚠️  audio delay failed — voice may lead subtitles")
 
+    label_dir = Path(tempfile.mkdtemp(prefix="label_"))
+    label_vf  = _corner_label_filter(corner_label, video_w, video_h, label_dir)
+
     if mode == "copy":
-        vf_args = []
+        vf_args = ["-vf", label_vf[1:]] if label_vf else []
     elif mode == "libass":
         font_size = max(20, int(video_h * (params.fontsize_pct * 0.8)))
         margin_v  = int(video_h * (1 - params.subtitle_y))
@@ -228,14 +247,14 @@ def _burn_subtitles(raw_path: str, audio_path: str,
             f"PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
             f"BackColour=&H80000000,"
             f"Outline=2,Shadow=1,BorderStyle=4,"
-            f"Alignment=2,MarginV={margin_v}'"
+            f"Alignment=2,MarginV={margin_v}'{label_vf}"
         ]
     else:
         cue_dir = Path(tempfile.mkdtemp(prefix="cues_"))
         vf_args = ["-vf", _drawtext_filter(active_srt, cue_dir, video_w, video_h,
                                            fontsize_pct=params.fontsize_pct,
                                            subtitle_y=params.subtitle_y,
-                                           max_cue_dur=params.max_cue_dur)]
+                                           max_cue_dur=params.max_cue_dur) + label_vf]
 
     cmd = [
         FFMPEG_BIN, "-y",
@@ -412,7 +431,8 @@ def _make_hook_card(hook_text: str, first_clip: str,
 def assemble_video(video_id: str, media_items, audio_path: str,
                    srt_path: str, hook_text: str = "",
                    scene_durations: list[float] | None = None,
-                   params: VideoRenderParams | None = None) -> dict[str, str]:
+                   params: VideoRenderParams | None = None,
+                   corner_label: str = "") -> dict[str, str]:
     """
     Build YouTube (16:9) and Reels (9:16) MP4s from mixed media.
 
@@ -550,7 +570,8 @@ def assemble_video(video_id: str, media_items, audio_path: str,
             # ── Step 4: audio + subtitles → final ────────────────────
             _burn_subtitles(raw_mp4, audio_path, srt_path, out_path,
                             subtitle_offset_ms=int(hook_dur * 1000),
-                            video_w=w, video_h=h, params=params)
+                            video_w=w, video_h=h, params=params,
+                            corner_label=corner_label)
 
         finally:
             # Clean up temp segments

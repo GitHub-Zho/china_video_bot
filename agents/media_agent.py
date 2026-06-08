@@ -68,6 +68,49 @@ def generate_images_wanx(prompt: str, n: int, out_dir: Path) -> list[str]:
         print(f"      [Wanx] generation error: {e}")
     return []
 
+
+def generate_video_wanx(prompt: str, out_dir: Path) -> str | None:
+    """
+    Generate a short VIDEO clip with Wanxiang text-to-video (通义万相 wanx2.1-t2v).
+    Returns the saved .mp4 path, or None. Slower than image gen (~30-60s) but gives
+    real motion footage of exactly the subject — used when stock has no good match.
+    """
+    from config.settings import DASHSCOPE_API_KEY
+    if not DASHSCOPE_API_KEY:
+        return None
+    headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+               "Content-Type": "application/json", "X-DashScope-Async": "enable"}
+    body = {"model": "wanx2.1-t2v-turbo",
+            "input": {"prompt": f"{prompt}, authentic China, cinematic, realistic, appetizing"},
+            "parameters": {"size": "1280*720"}}
+    try:
+        r = requests.post(
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis",
+            headers=headers, json=body, verify=False, timeout=30)
+        r.raise_for_status()
+        tid = r.json()["output"]["task_id"]
+        poll_h = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}"}
+        for _ in range(40):
+            time.sleep(5)
+            p = requests.get(f"https://dashscope.aliyuncs.com/api/v1/tasks/{tid}",
+                             headers=poll_h, verify=False, timeout=30).json()
+            st = p.get("output", {}).get("task_status")
+            if st == "SUCCEEDED":
+                u = p["output"].get("video_url")
+                if not u:
+                    return None
+                data = requests.get(u, verify=False, timeout=120).content
+                if len(data) > 50_000:
+                    pth = out_dir / "genvideo.mp4"
+                    pth.write_bytes(data)
+                    return str(pth)
+                return None
+            if st == "FAILED":
+                return None
+    except Exception as e:
+        print(f"      [Wanx] video gen error: {e}")
+    return None
+
 # ── Types ──────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -288,8 +331,9 @@ def find_replacement_clip(video_id: str, scene_index: int, search_query: str,
          image (.jpg, shown with Ken Burns).
     Returns True if replaced, False if nothing good enough exists.
     """
-    import tempfile, shutil
+    import tempfile, shutil, subprocess
     from agents.vision import vision_available, analyse_images_json
+    from config.settings import FFMPEG_BIN
     if not vision_available():
         return False
 
@@ -311,13 +355,21 @@ def find_replacement_clip(video_id: str, scene_index: int, search_query: str,
                 pp.write_bytes(data)
                 pool.append({"kind": "clip", "preview": str(pp), "url": c["url"]})
 
-        # Generate 2 images as extra candidates (the user's idea — let Qwen make
-        # footage when the library has none)
-        gen = generate_images_wanx(judge, 2, work)
+        # Generate AI footage as extra candidates (the user's idea — let Qwen MAKE
+        # footage when the library has none): one VIDEO (motion) + one image.
+        gv = generate_video_wanx(judge, work)
+        if gv:
+            fr = work / "gv_frame.jpg"
+            subprocess.run([FFMPEG_BIN, "-y", "-ss", "2", "-i", gv, "-frames:v", "1",
+                            "-vf", "scale=480:-1", str(fr)], capture_output=True)
+            if fr.exists():
+                pool.append({"kind": "genvideo", "preview": str(fr), "video": gv})
+        gen = generate_images_wanx(judge, 1, work)
         for g in gen:
             pool.append({"kind": "image", "preview": g, "img": g})
-        if gen:
-            print(f"      scene {scene_index}: generated {len(gen)} image(s) to compare")
+        if gv or gen:
+            print(f"      scene {scene_index}: generated "
+                  f"{'1 video ' if gv else ''}{len(gen)} image(s) to compare")
 
         if not pool:
             return False
@@ -349,6 +401,10 @@ def find_replacement_clip(video_id: str, scene_index: int, search_query: str,
             (media_dir / f"{scene_index:02d}.jpg").unlink(missing_ok=True)
             (media_dir / f"{scene_index:02d}.mp4").write_bytes(data)
             print(f"      scene {scene_index}: ✅ replaced with stock clip (score {score}/10)")
+        elif winner["kind"] == "genvideo":
+            (media_dir / f"{scene_index:02d}.jpg").unlink(missing_ok=True)
+            shutil.copy(winner["video"], media_dir / f"{scene_index:02d}.mp4")
+            print(f"      scene {scene_index}: ✅ replaced with AI-generated VIDEO (score {score}/10)")
         else:   # generated image → photo segment (Ken Burns)
             (media_dir / f"{scene_index:02d}.mp4").unlink(missing_ok=True)
             shutil.copy(winner["img"], media_dir / f"{scene_index:02d}.jpg")

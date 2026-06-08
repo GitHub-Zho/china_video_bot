@@ -109,16 +109,39 @@ def _fallback_template(audience_type: str | None) -> dict:
 def generate_script(audience_type: str = None) -> dict:
     """
     Generate a video script using Groq API (free).
-    Falls back to built-in template bank if API fails.
+    Critic Agent scores the result; regenerates up to MAX_RETRIES if score < 7.
+    Falls back to built-in template bank if API fails entirely.
     """
-    try:
-        print("  [Script] Calling Groq API (llama-3.3-70b)...")
-        data = _generate_via_groq(audience_type)
-        print(f"  [Script] ✅ Generated: {data.get('topic', '?')}")
-    except Exception as e:
-        print(f"  [Script] Groq unavailable ({e}), using template fallback")
-        data = _fallback_template(audience_type)
-        print(f"  [Script] ✅ Template: {data['topic']}")
+    from agents.critic_agent import critique_script, MAX_RETRIES
+
+    data         = None
+    critique_ctx = ""   # feedback fed into next attempt
+
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            if attempt == 0:
+                print("  [Script] Calling Groq API (llama-3.3-70b)...")
+            else:
+                print(f"  [Script] Retry {attempt}/{MAX_RETRIES} with critic feedback…")
+
+            data = _generate_via_groq_with_critique(audience_type, critique_ctx)
+            print(f"  [Script] ✅ Generated: {data.get('topic', '?')}")
+
+        except Exception as e:
+            print(f"  [Script] Groq unavailable ({e}), using template fallback")
+            data = _fallback_template(audience_type)
+            print(f"  [Script] ✅ Template: {data['topic']}")
+            break   # templates skip critic loop
+
+        # ── Critic evaluation ──────────────────────────────────────────
+        result = critique_script(
+            script=data.get("script", ""),
+            topic=data.get("topic", ""),
+            audience_type=data.get("audience_type", audience_type or "newcomer"),
+        )
+        if result.passed:
+            break
+        critique_ctx = result.feedback   # pass feedback into next attempt
 
     # Normalise: ensure 8 image queries
     queries = data.get("image_queries", [])
@@ -127,3 +150,50 @@ def generate_script(audience_type: str = None) -> dict:
     data["image_queries"] = queries[:8]
 
     return data
+
+
+def _generate_via_groq_with_critique(
+    audience_type: str | None,
+    critique_feedback: str = "",
+) -> dict:
+    """Groq generation, optionally including critic feedback from previous attempt."""
+    from groq import Groq
+
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY not set")
+
+    client   = Groq(api_key=api_key)
+    feedback = _load_feedback()
+    system   = SYSTEM_PROMPT + (feedback if feedback else "")
+
+    user_msg = (
+        f"Generate a script. Audience type: {audience_type}."
+        if audience_type
+        else "Choose the best audience type and topic for today."
+    )
+    if critique_feedback:
+        user_msg += (
+            f"\n\nPREVIOUS ATTEMPT FAILED QUALITY CHECK. Improve based on this feedback:\n"
+            f"{critique_feedback}"
+        )
+
+    response = _generate_via_groq.__wrapped__ if hasattr(_generate_via_groq, '__wrapped__') \
+               else None
+
+    # Direct Groq call
+    resp = Groq(api_key=api_key).chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user_msg},
+        ],
+        temperature=0.8,
+        max_tokens=900,
+    )
+    raw = resp.choices[0].message.content.strip()
+    if "```json" in raw:
+        raw = raw.split("```json")[1].split("```")[0].strip()
+    elif "```" in raw:
+        raw = raw.split("```")[1].split("```")[0].strip()
+    return json.loads(raw)
