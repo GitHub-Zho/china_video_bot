@@ -209,18 +209,56 @@ def _pick_best_candidate(candidates: list[dict], query: str) -> dict | None:
         prompt = (
             f"Each image is a candidate stock-video preview for this scene:\n"
             f'"{query}"\n\n'
-            f"Pick the candidate that best matches the scene — correct location/subject, "
-            f"good composition, clearly China travel footage. Avoid generic/off-topic ones.\n"
-            f'Return ONLY JSON: {{"best": <candidate number>, "why": "<short reason>"}}'
+            f"Pick the candidate that best matches the scene — correct subject, clearly "
+            f"China travel footage. Also rate how well it actually matches (0-10).\n"
+            f'Return ONLY JSON: {{"best": <number>, "score": <0-10>, "why": "<short>"}}'
         )
         result = analyse_images_json(paths, prompt, labels)
         if isinstance(result, dict) and isinstance(result.get("best"), int):
             idx = result["best"]
             if 0 <= idx < len(kept):
-                return kept[idx]
+                chosen = dict(kept[idx])
+                chosen["score"] = result.get("score", 0)
+                return chosen
         return None
     finally:
         shutil.rmtree(prev_dir, ignore_errors=True)
+
+
+def find_replacement_clip(video_id: str, scene_index: int, search_query: str,
+                          narration: str, min_score: int = 6) -> bool:
+    """
+    Auto-remediation: when QA flags a scene mismatch, search fresh candidates and
+    let the verifier (Qwen) pick the best one that GENUINELY matches the narration.
+    If a good match (score ≥ min_score) is found, download it as the scene's clip
+    and return True. If nothing good exists in the library, return False (the
+    caller keeps the original / falls back to alternatives for human review).
+    """
+    from agents.vision import vision_available
+    if not vision_available():
+        return False
+
+    china_q = f"China {search_query}" if "china" not in search_query.lower() else search_query
+    candidates = (_search_pexels_video_candidates(china_q, n=12) +
+                  _search_pixabay_video_candidates(china_q, n=8))
+    if not candidates:
+        return False
+
+    # Qwen judges previews against the actual narration meaning, with a threshold
+    judge = f"{narration} ({search_query})"
+    best = _pick_best_candidate(candidates, judge)
+    if not best or best.get("score", 0) < min_score:
+        print(f"      scene {scene_index}: no candidate scored ≥{min_score} "
+              f"(best={best.get('score','?') if best else 'none'}) — keeping original")
+        return False
+
+    data = _download_bytes(best["url"])
+    if not data or len(data) < 50_000:
+        return False
+    target = Path(OUTPUT_DIR) / video_id / "media" / f"{scene_index:02d}.mp4"
+    target.write_bytes(data)
+    print(f"      scene {scene_index}: ✅ replaced with better match (score {best['score']}/10)")
+    return True
 
 
 # ── Scene alternatives (human-in-the-loop mismatch fix) ───────────────────────

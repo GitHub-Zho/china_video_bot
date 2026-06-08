@@ -113,6 +113,26 @@ def _save_render_state(vid: str, brief, scene_durations: list[float]) -> None:
     (Path(OUTPUT_DIR) / vid / "render_state.json").write_text(json.dumps(state, indent=2))
 
 
+def _reassemble_from_media(vid: str, brief, scene_durations: list[float]) -> None:
+    """Rebuild both video variants from the current media/ folder (after a clip
+    was swapped on disk). Used by Qwen auto-replacement."""
+    from agents.media_agent import MediaItem
+    base = Path(OUTPUT_DIR) / vid
+    media_items = []
+    for i in range(len(brief.scenes)):
+        clip  = base / "media" / f"{i:02d}.mp4"
+        photo = base / "media" / f"{i:02d}.jpg"
+        if clip.exists():
+            media_items.append(MediaItem(str(clip), "clip"))
+        elif photo.exists():
+            media_items.append(MediaItem(str(photo), "photo"))
+    for f in ("youtube.mp4", "reels.mp4", "youtube_raw.mp4", "reels_raw.mp4"):
+        (base / f).unlink(missing_ok=True)
+    assemble_video(vid, media_items, str(base / "audio.mp3"),
+                   str(base / "subtitles.srt"), hook_text=brief.hook,
+                   scene_durations=scene_durations)
+
+
 def _qa_and_remediate(vid: str, video_paths: dict, brief=None,
                       scene_durations: list[float] | None = None) -> None:
     """
@@ -130,36 +150,35 @@ def _qa_and_remediate(vid: str, video_paths: dict, brief=None,
     report = qa_check(yt_path, hook_seconds=HOOK_CARD_SECONDS,
                       scene_windows=scene_windows)
 
-    # ── Content mismatches → download alternatives for human pick ─────────────
+    # ── Content mismatches → Qwen AUTO-replaces the bad clips ─────────────────
     mism = [i for i in report.issues if i.category == "content"]
     if mism and brief and scene_windows:
-        from agents.media_agent import download_scene_alternatives
-        print(f"  [QC] ⚠️  {len(mism)} content mismatch(es) — fetching alternatives to pick from:")
-        review = []
+        from agents.media_agent import (find_replacement_clip,
+                                        download_scene_alternatives)
+        print(f"  [QC] ⚠️  {len(mism)} content mismatch(es) — Qwen auto-replacing:")
+        replaced, unfixable = [], []
         done_scenes = set()
         for issue in mism:
-            # map timestamp → scene index via the windows
             idx = next((k for k, (s, e, _) in enumerate(scene_windows)
                         if s <= issue.timestamp_s < e), None)
             if idx is None or idx in done_scenes:
                 continue
             done_scenes.add(idx)
-            print(f"        • scene {idx}: {issue.description}")
-            alts = download_scene_alternatives(
-                vid, idx, brief.scenes[idx].visual_query, n=3)
-            review.append({
-                "scene_index": idx,
-                "narration": brief.scenes[idx].narration,
-                "issue": issue.description,
-                "current_clip": f"media/{idx:02d}.mp4",
-                "alternatives": [a["preview"].split(f"{vid}/")[-1] for a in alts],
-                "apply_command": f"python scripts/run.py --fix {vid} --scene {idx} --pick <0-{len(alts)-1}>",
-            })
-        if review:
-            (Path(OUTPUT_DIR) / vid / "review.json").write_text(
-                json.dumps(review, indent=2))
-            print(f"  [QC] 📋 Review {len(review)} scene(s): open output/{vid}/alternatives/"
-                  f" and run the --fix command in output/{vid}/review.json")
+            print(f"        • scene {idx}: {issue.description[:70]}")
+            ok = find_replacement_clip(vid, idx, brief.scenes[idx].stock_query(),
+                                       brief.scenes[idx].narration)
+            (replaced if ok else unfixable).append(idx)
+
+        if replaced:
+            # Clips changed on disk → re-assemble the whole video from media/
+            print(f"  [QC] Re-assembling with {len(replaced)} replaced scene(s)…")
+            _reassemble_from_media(vid, brief, scene_durations)
+
+        # Scenes with no good footage anywhere → leave alternatives for human pick
+        for idx in unfixable:
+            alts = download_scene_alternatives(vid, idx, brief.scenes[idx].stock_query(), n=3)
+            print(f"  [QC] scene {idx}: no good auto-match — {len(alts)} alternatives "
+                  f"saved for manual pick (--fix {vid} --scene {idx} --pick K)")
 
     params = VideoRenderParams()
     new_params, changed = adjust_params_from_qa(report, params)
