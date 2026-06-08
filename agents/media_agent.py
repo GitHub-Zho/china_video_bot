@@ -9,6 +9,7 @@ Priority:
 Returns a list of MediaItem(path, type) so the video agent knows
 whether each asset is a 'clip' or a 'photo' and handles accordingly.
 """
+import os
 import time
 import requests
 from dataclasses import dataclass
@@ -17,6 +18,55 @@ from config.settings import (
     PEXELS_API_KEY, UNSPLASH_ACCESS_KEY, PIXABAY_API_KEY,
     IMAGES_PER_VIDEO, IMAGE_DOWNLOAD_DELAY, API_CALL_DELAY, OUTPUT_DIR,
 )
+
+
+# ── AI image generation (Wanxiang via DashScope) — last-resort footage ────────
+
+def generate_images_wanx(prompt: str, n: int, out_dir: Path) -> list[str]:
+    """
+    Generate `n` images with Alibaba's Wanxiang (通义万相) text-to-image, used only
+    when stock libraries have no good match. Returns list of saved local paths.
+    Requires DASHSCOPE_API_KEY; returns [] if unavailable or on failure.
+    """
+    from config.settings import DASHSCOPE_API_KEY
+    if not DASHSCOPE_API_KEY:
+        return []
+    headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+               "Content-Type": "application/json", "X-DashScope-Async": "enable"}
+    full_prompt = (f"{prompt}, authentic China, realistic photography, "
+                   f"appetizing, high detail, natural lighting")
+    body = {"model": "wanx2.1-t2i-turbo",
+            "input": {"prompt": full_prompt},
+            "parameters": {"n": n, "size": "1280*720"}}
+    try:
+        r = requests.post(
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis",
+            headers=headers, json=body, verify=False, timeout=30)
+        r.raise_for_status()
+        tid = r.json()["output"]["task_id"]
+        poll_h = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}"}
+        for _ in range(30):
+            time.sleep(3)
+            p = requests.get(f"https://dashscope.aliyuncs.com/api/v1/tasks/{tid}",
+                             headers=poll_h, verify=False, timeout=30).json()
+            st = p.get("output", {}).get("task_status")
+            if st == "SUCCEEDED":
+                out = []
+                for i, x in enumerate(p["output"].get("results", [])):
+                    u = x.get("url")
+                    if not u:
+                        continue
+                    data = requests.get(u, verify=False, timeout=40).content
+                    if len(data) > 5000:
+                        pth = out_dir / f"gen_{i}.jpg"
+                        pth.write_bytes(data)
+                        out.append(str(pth))
+                return out
+            if st == "FAILED":
+                return []
+    except Exception as e:
+        print(f"      [Wanx] generation error: {e}")
+    return []
 
 # ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -228,37 +278,84 @@ def _pick_best_candidate(candidates: list[dict], query: str) -> dict | None:
 def find_replacement_clip(video_id: str, scene_index: int, search_query: str,
                           narration: str, min_score: int = 6) -> bool:
     """
-    Auto-remediation: when QA flags a scene mismatch, search fresh candidates and
-    let the verifier (Qwen) pick the best one that GENUINELY matches the narration.
-    If a good match (score ≥ min_score) is found, download it as the scene's clip
-    and return True. If nothing good exists in the library, return False (the
-    caller keeps the original / falls back to alternatives for human review).
+    Auto-remediation when QA flags a scene mismatch:
+      1. Search fresh STOCK candidates.
+      2. If the best stock preview doesn't clearly match, also GENERATE 2 images
+         with Wanxiang (通义万相).
+      3. Score the stock previews + generated images TOGETHER (Qwen) and pick the
+         single best match for the narration.
+      4. Replace the scene with the winner — a stock clip (.mp4) or a generated
+         image (.jpg, shown with Ken Burns).
+    Returns True if replaced, False if nothing good enough exists.
     """
-    from agents.vision import vision_available
+    import tempfile, shutil
+    from agents.vision import vision_available, analyse_images_json
     if not vision_available():
         return False
 
-    china_q = f"China {search_query}" if "china" not in search_query.lower() else search_query
-    candidates = (_search_pexels_video_candidates(china_q, n=12) +
-                  _search_pixabay_video_candidates(china_q, n=8))
-    if not candidates:
-        return False
-
-    # Qwen judges previews against the actual narration meaning, with a threshold
+    media_dir = Path(OUTPUT_DIR) / video_id / "media"
     judge = f"{narration} ({search_query})"
-    best = _pick_best_candidate(candidates, judge)
-    if not best or best.get("score", 0) < min_score:
-        print(f"      scene {scene_index}: no candidate scored ≥{min_score} "
-              f"(best={best.get('score','?') if best else 'none'}) — keeping original")
-        return False
+    china_q = f"China {search_query}" if "china" not in search_query.lower() else search_query
+    stock = (_search_pexels_video_candidates(china_q, n=10) +
+             _search_pixabay_video_candidates(china_q, n=6))
+    stock = [c for c in stock if c.get("preview")][:5]
 
-    data = _download_bytes(best["url"])
-    if not data or len(data) < 50_000:
-        return False
-    target = Path(OUTPUT_DIR) / video_id / "media" / f"{scene_index:02d}.mp4"
-    target.write_bytes(data)
-    print(f"      scene {scene_index}: ✅ replaced with better match (score {best['score']}/10)")
-    return True
+    work = Path(tempfile.mkdtemp(prefix="fix_"))
+    try:
+        # Build a unified candidate pool: stock previews + generated images
+        pool = []   # {kind: "clip"|"image", preview_path, url(for clip)|img_path}
+        for c in stock:
+            data = _download_bytes(c["preview"])
+            if data:
+                pp = work / f"st_{len(pool)}.jpg"
+                pp.write_bytes(data)
+                pool.append({"kind": "clip", "preview": str(pp), "url": c["url"]})
+
+        # Generate 2 images as extra candidates (the user's idea — let Qwen make
+        # footage when the library has none)
+        gen = generate_images_wanx(judge, 2, work)
+        for g in gen:
+            pool.append({"kind": "image", "preview": g, "img": g})
+        if gen:
+            print(f"      scene {scene_index}: generated {len(gen)} image(s) to compare")
+
+        if not pool:
+            return False
+
+        # Score all candidates together against the narration
+        paths  = [c["preview"] for c in pool]
+        labels = [f"[Candidate {i} — {'AI-generated' if pool[i]['kind']=='image' else 'stock'}]"
+                  for i in range(len(pool))]
+        prompt = (
+            f"Each image is a candidate visual for this narration line:\n\"{narration}\"\n"
+            f"(subject: {search_query})\n\n"
+            f"Pick the candidate that BEST shows what the narration describes, and rate it 0-10.\n"
+            f'Return ONLY JSON: {{"best": <number>, "score": <0-10>, "why": "<short>"}}'
+        )
+        result = analyse_images_json(paths, prompt, labels)
+        if not (isinstance(result, dict) and isinstance(result.get("best"), int)):
+            return False
+        idx = result["best"]
+        score = result.get("score", 0)
+        if not (0 <= idx < len(pool)) or score < min_score:
+            print(f"      scene {scene_index}: best only scored {score}/10 — keeping original")
+            return False
+
+        winner = pool[idx]
+        if winner["kind"] == "clip":
+            data = _download_bytes(winner["url"])
+            if not data or len(data) < 50_000:
+                return False
+            (media_dir / f"{scene_index:02d}.jpg").unlink(missing_ok=True)
+            (media_dir / f"{scene_index:02d}.mp4").write_bytes(data)
+            print(f"      scene {scene_index}: ✅ replaced with stock clip (score {score}/10)")
+        else:   # generated image → photo segment (Ken Burns)
+            (media_dir / f"{scene_index:02d}.mp4").unlink(missing_ok=True)
+            shutil.copy(winner["img"], media_dir / f"{scene_index:02d}.jpg")
+            print(f"      scene {scene_index}: ✅ replaced with AI-generated image (score {score}/10)")
+        return True
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 # ── Scene alternatives (human-in-the-loop mismatch fix) ───────────────────────
