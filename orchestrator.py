@@ -166,7 +166,8 @@ def _qa_and_remediate(vid: str, video_paths: dict, brief=None,
             done_scenes.add(idx)
             print(f"        • scene {idx}: {issue.description[:70]}")
             ok = find_replacement_clip(vid, idx, brief.scenes[idx].stock_query(),
-                                       brief.scenes[idx].narration)
+                                       brief.scenes[idx].narration,
+                                       gen_prompt=brief.scenes[idx].generation_prompt())
             (replaced if ok else unfixable).append(idx)
 
         if replaced:
@@ -304,6 +305,10 @@ def _run_one(video_type, audience_type, dry_run, prompt, style, review,
                          target_seconds=target_seconds, video_type=video_type)
     print(f"      Topic    : {brief.topic}  |  Audience: {brief.audience_type}")
 
+    # Art director: Qwen reads the whole script → rich per-scene generation prompts
+    from agents.art_director import enrich_gen_prompts
+    enrich_gen_prompts(brief)
+
     out_dir = Path(OUTPUT_DIR) / vid
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "metadata.json").write_text(json.dumps(brief.to_metadata_dict(), indent=2))
@@ -335,9 +340,11 @@ def _build_from_brief(vid: str, brief, dry_run: bool = False,
 
     # ── 3. Media ─────────────────────────────────────────────
     print("\n[3/5] Downloading media…")
-    search_queries = [s.stock_query() for s in brief.scenes]   # plain keywords for search
-    match_descs    = [s.visual_query for s in brief.scenes]     # rich text to judge match
-    media_items = download_media(vid, search_queries, match_descriptions=match_descs)
+    search_queries = [s.stock_query() for s in brief.scenes]       # keywords for stock search
+    match_descs    = [s.narration for s in brief.scenes]           # judge against the narration
+    gen_prompts    = [s.generation_prompt() for s in brief.scenes] # rich prompts for AI gen
+    media_items = download_media(vid, search_queries,
+                                 match_descriptions=match_descs, gen_prompts=gen_prompts)
     if len(media_items) < 2:
         raise RuntimeError(f"Only {len(media_items)} media item(s) — check API keys.")
     clips  = sum(1 for m in media_items if m.kind == "clip")

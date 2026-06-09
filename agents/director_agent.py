@@ -61,10 +61,15 @@ class ScenePlan:
     duration:     float   # target seconds
     emotion:      str     # cinematic | energetic | serene | dramatic | warm
     search_query: str = ""  # 2-4 plain keywords for stock SEARCH (the subject/dish/action)
+    gen_prompt:   str = ""  # rich context-aware prompt for AI image/video generation
 
     def stock_query(self) -> str:
         """Keyword query for stock sites — falls back to visual_query."""
         return self.search_query.strip() or self.visual_query
+
+    def generation_prompt(self) -> str:
+        """Rich prompt for AI generation — falls back to narration + subject."""
+        return self.gen_prompt.strip() or f"{self.narration} ({self.stock_query()})"
 
 
 @dataclass
@@ -115,6 +120,7 @@ class CreativeBrief:
             "scenes": [
                 {"index": s.index, "narration": s.narration,
                  "visual_query": s.visual_query, "search_query": s.search_query,
+                 "gen_prompt": s.gen_prompt,
                  "duration": s.duration, "emotion": s.emotion}
                 for s in self.scenes
             ],
@@ -131,6 +137,7 @@ class CreativeBrief:
                 duration=float(s.get("duration", 4.0)),
                 emotion=s.get("emotion", "cinematic"),
                 search_query=s.get("search_query", ""),
+                gen_prompt=s.get("gen_prompt", ""),
             )
             for i, s in enumerate(d.get("scenes", []))
         ]

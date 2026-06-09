@@ -318,100 +318,106 @@ def _pick_best_candidate(candidates: list[dict], query: str) -> dict | None:
         shutil.rmtree(prev_dir, ignore_errors=True)
 
 
-def find_replacement_clip(video_id: str, scene_index: int, search_query: str,
-                          narration: str, min_score: int = 6) -> bool:
+def compete_and_apply(video_id: str, scene_index: int, search_query: str,
+                      narration: str, gen_prompt: str = "", min_score: int = 5,
+                      make_video: bool = False, used_ids: set | None = None) -> str | None:
     """
-    Auto-remediation when QA flags a scene mismatch:
-      1. Search fresh STOCK candidates.
-      2. If the best stock preview doesn't clearly match, also GENERATE 2 images
-         with Wanxiang (通义万相).
-      3. Score the stock previews + generated images TOGETHER (Qwen) and pick the
-         single best match for the narration.
-      4. Replace the scene with the winner — a stock clip (.mp4) or a generated
-         image (.jpg, shown with Ken Burns).
-    Returns True if replaced, False if nothing good enough exists.
+    Core selection: build a pool of STOCK candidates + AI-GENERATED footage (image,
+    and optionally a video), then let Qwen score them ALL against the narration and
+    apply the single best to the scene's media slot.
+
+    gen_prompt: the rich, full-context prompt from the Art Director (preferred for
+                AI generation — a bare keyword gives the model no context).
+    make_video: also generate an AI video candidate (slower; used on QA escalation).
+    Returns "clip" | "genvideo" | "image" if applied, else None.
     """
     import tempfile, shutil, subprocess
     from agents.vision import vision_available, analyse_images_json
     from config.settings import FFMPEG_BIN
     if not vision_available():
-        return False
+        return None
 
     media_dir = Path(OUTPUT_DIR) / video_id / "media"
-    judge = f"{narration} ({search_query})"
+    gp = gen_prompt.strip() or f"{narration} ({search_query})"
     china_q = f"China {search_query}" if "china" not in search_query.lower() else search_query
     stock = (_search_pexels_video_candidates(china_q, n=10) +
              _search_pixabay_video_candidates(china_q, n=6))
+    if used_ids:
+        stock = [c for c in stock if c["id"] not in used_ids]
     stock = [c for c in stock if c.get("preview")][:5]
 
-    work = Path(tempfile.mkdtemp(prefix="fix_"))
+    work = Path(tempfile.mkdtemp(prefix="pick_"))
     try:
-        # Build a unified candidate pool: stock previews + generated images
-        pool = []   # {kind: "clip"|"image", preview_path, url(for clip)|img_path}
+        pool = []
         for c in stock:
             data = _download_bytes(c["preview"])
             if data:
                 pp = work / f"st_{len(pool)}.jpg"
                 pp.write_bytes(data)
-                pool.append({"kind": "clip", "preview": str(pp), "url": c["url"]})
+                pool.append({"kind": "clip", "preview": str(pp), "url": c["url"], "id": c["id"]})
 
-        # Generate AI footage as extra candidates (the user's idea — let Qwen MAKE
-        # footage when the library has none): one VIDEO (motion) + one image.
-        gv = generate_video_wanx(judge, work)
-        if gv:
-            fr = work / "gv_frame.jpg"
-            subprocess.run([FFMPEG_BIN, "-y", "-ss", "2", "-i", gv, "-frames:v", "1",
-                            "-vf", "scale=480:-1", str(fr)], capture_output=True)
-            if fr.exists():
-                pool.append({"kind": "genvideo", "preview": str(fr), "video": gv})
-        gen = generate_images_wanx(judge, 1, work)
-        for g in gen:
+        # AI candidates from the RICH context-aware prompt
+        if make_video:
+            gv = generate_video_wanx(gp, work)
+            if gv:
+                fr = work / "gv_frame.jpg"
+                subprocess.run([FFMPEG_BIN, "-y", "-ss", "2", "-i", gv, "-frames:v", "1",
+                                "-vf", "scale=480:-1", str(fr)], capture_output=True)
+                if fr.exists():
+                    pool.append({"kind": "genvideo", "preview": str(fr), "video": gv})
+        for g in generate_images_wanx(gp, 1, work):
             pool.append({"kind": "image", "preview": g, "img": g})
-        if gv or gen:
-            print(f"      scene {scene_index}: generated "
-                  f"{'1 video ' if gv else ''}{len(gen)} image(s) to compare")
 
         if not pool:
-            return False
+            return None
 
-        # Score all candidates together against the narration
         paths  = [c["preview"] for c in pool]
-        labels = [f"[Candidate {i} — {'AI-generated' if pool[i]['kind']=='image' else 'stock'}]"
+        labels = [f"[Candidate {i} — {'AI-generated' if pool[i]['kind']!='clip' else 'stock'}]"
                   for i in range(len(pool))]
         prompt = (
             f"Each image is a candidate visual for this narration line:\n\"{narration}\"\n"
             f"(subject: {search_query})\n\n"
-            f"Pick the candidate that BEST shows what the narration describes, and rate it 0-10.\n"
+            f"Pick the candidate that BEST and most clearly shows what the narration "
+            f"describes, and rate it 0-10. Prefer clearly-on-topic over generic.\n"
             f'Return ONLY JSON: {{"best": <number>, "score": <0-10>, "why": "<short>"}}'
         )
         result = analyse_images_json(paths, prompt, labels)
         if not (isinstance(result, dict) and isinstance(result.get("best"), int)):
-            return False
-        idx = result["best"]
-        score = result.get("score", 0)
+            return None
+        idx, score = result["best"], result.get("score", 0)
         if not (0 <= idx < len(pool)) or score < min_score:
-            print(f"      scene {scene_index}: best only scored {score}/10 — keeping original")
-            return False
+            print(f"      scene {scene_index}: best only {score}/10 — no good option")
+            return None
 
-        winner = pool[idx]
-        if winner["kind"] == "clip":
-            data = _download_bytes(winner["url"])
+        w = pool[idx]
+        if w["kind"] == "clip":
+            data = _download_bytes(w["url"])
             if not data or len(data) < 50_000:
-                return False
+                return None
             (media_dir / f"{scene_index:02d}.jpg").unlink(missing_ok=True)
             (media_dir / f"{scene_index:02d}.mp4").write_bytes(data)
-            print(f"      scene {scene_index}: ✅ replaced with stock clip (score {score}/10)")
-        elif winner["kind"] == "genvideo":
+            if used_ids is not None and w.get("id") is not None:
+                used_ids.add(w["id"])
+            print(f"      scene {scene_index}: ✅ stock clip (score {score}/10)")
+        elif w["kind"] == "genvideo":
             (media_dir / f"{scene_index:02d}.jpg").unlink(missing_ok=True)
-            shutil.copy(winner["video"], media_dir / f"{scene_index:02d}.mp4")
-            print(f"      scene {scene_index}: ✅ replaced with AI-generated VIDEO (score {score}/10)")
-        else:   # generated image → photo segment (Ken Burns)
+            shutil.copy(w["video"], media_dir / f"{scene_index:02d}.mp4")
+            print(f"      scene {scene_index}: ✅ AI-generated VIDEO (score {score}/10)")
+        else:
             (media_dir / f"{scene_index:02d}.mp4").unlink(missing_ok=True)
-            shutil.copy(winner["img"], media_dir / f"{scene_index:02d}.jpg")
-            print(f"      scene {scene_index}: ✅ replaced with AI-generated image (score {score}/10)")
-        return True
+            shutil.copy(w["img"], media_dir / f"{scene_index:02d}.jpg")
+            print(f"      scene {scene_index}: ✅ AI-generated image (score {score}/10)")
+        return w["kind"]
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def find_replacement_clip(video_id: str, scene_index: int, search_query: str,
+                          narration: str, gen_prompt: str = "", min_score: int = 6) -> bool:
+    """QA-escalation: compete stock + AI image + AI VIDEO, apply best ≥ min_score."""
+    return compete_and_apply(video_id, scene_index, search_query, narration,
+                             gen_prompt=gen_prompt, min_score=min_score,
+                             make_video=True) is not None
 
 
 # ── Scene alternatives (human-in-the-loop mismatch fix) ───────────────────────
@@ -472,7 +478,8 @@ def download_scene_alternatives(video_id: str, scene_index: int, query: str,
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def download_media(video_id: str, queries: list[str],
-                   match_descriptions: list[str] | None = None) -> list[MediaItem]:
+                   match_descriptions: list[str] | None = None,
+                   gen_prompts: list[str] | None = None) -> list[MediaItem]:
     """
     Download one media item per scene.
 
@@ -509,52 +516,41 @@ def download_media(video_id: str, queries: list[str],
             items.append(MediaItem(str(photo_path), "photo"))
             continue
 
-        print(f"  [Media] {i+1}/{len(target)} '{china_q}'…", end=" ", flush=True)
+        print(f"  [Media] {i+1}/{len(target)} '{china_q}'…")
         time.sleep(API_CALL_DELAY)
 
-        # ── Try 1: video clip — pool Pexels + Pixabay, dedup, Vision-pick ──
-        candidates = _search_pexels_video_candidates(china_q)
-        candidates += _search_pixabay_video_candidates(china_q)
-        fresh = [c for c in candidates if c["id"] not in used_video_ids]
-        # Vision picks the best-matching fresh candidate; falls back to first.
-        pick = None
-        if fresh:
-            best = _pick_best_candidate(fresh, judge_q)
-            pick = best if best else fresh[0]
-            if best:
-                print("(vision-picked) ", end="")
-        got_clip = False
-        if pick:
-            data = _download_bytes(pick["url"])
-            if data and len(data) > 50_000:
-                clip_path.write_bytes(data)
-                used_video_ids.add(pick["id"])
-                reused = " (search had only used clips)" if not fresh else ""
-                print(f"clip ✓ ({len(data)//1024}KB){reused}")
-                items.append(MediaItem(str(clip_path), "clip"))
-                got_clip = True
-                time.sleep(IMAGE_DOWNLOAD_DELAY)
-        if got_clip:
+        # ── Preferred: stock + AI-image COMPETE, Qwen picks best ──────────
+        # Uses the rich Art-Director gen_prompt so AI generation has full context.
+        gp = gen_prompts[i] if gen_prompts and i < len(gen_prompts) else ""
+        kind = compete_and_apply(video_id, i, query, judge_q, gen_prompt=gp,
+                                 min_score=5, make_video=False, used_ids=used_video_ids)
+        if kind in ("clip", "genvideo"):
+            items.append(MediaItem(str(clip_path), "clip"))
+            continue
+        if kind == "image":
+            items.append(MediaItem(str(photo_path), "photo"))
             continue
 
-        # ── Try 2: Pexels photo ───────────────────────────────────────────
-        time.sleep(API_CALL_DELAY)
-        photo_url = _search_pexels_photo(china_q)
-        if not photo_url:
-            # Try 3: Unsplash photo
-            time.sleep(API_CALL_DELAY)
-            photo_url = _search_unsplash_photo(china_q)
-
+        # ── Fallback (vision unavailable): first stock clip, then photo ────
+        candidates = _search_pexels_video_candidates(china_q)
+        candidates += _search_pixabay_video_candidates(china_q)
+        fresh = [c for c in candidates if c["id"] not in used_video_ids] or candidates
+        if fresh:
+            data = _download_bytes(fresh[0]["url"])
+            if data and len(data) > 50_000:
+                clip_path.write_bytes(data)
+                used_video_ids.add(fresh[0]["id"])
+                print(f"      clip ✓ ({len(data)//1024}KB)")
+                items.append(MediaItem(str(clip_path), "clip"))
+                continue
+        photo_url = _search_pexels_photo(china_q) or _search_unsplash_photo(china_q)
         if photo_url:
             data = _download_bytes(photo_url)
             if data and len(data) > 5_000:
                 photo_path.write_bytes(data)
-                print(f"photo ✓ ({len(data)//1024}KB)")
                 items.append(MediaItem(str(photo_path), "photo"))
-                time.sleep(IMAGE_DOWNLOAD_DELAY)
                 continue
-
-        print("skipped (no result)")
+        print("      skipped (no result)")
 
     clips  = sum(1 for m in items if m.kind == "clip")
     photos = sum(1 for m in items if m.kind == "photo")
