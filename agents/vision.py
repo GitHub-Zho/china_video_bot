@@ -82,17 +82,25 @@ def _qwen_vision(image_paths, prompt, labels, temperature, max_tokens) -> str | 
     }
     headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}",
                "Content-Type": "application/json"}
-    for verify in (True, False):
+    # This payload carries 5-6 base64 images — the LARGEST DashScope request in the
+    # pipeline — so it drops with SSL EOF most often. A single verify=True/False pass
+    # is not enough: when the Qwen judge fails, compete_and_apply can't score the
+    # AI-generated close-up and falls back to a generic stock clip. Retry hard.
+    import time
+    last = None
+    for attempt in range(8):
         try:
             r = requests.post(_QWEN_ENDPOINT, headers=headers, json=payload,
-                              timeout=120, verify=verify)
+                              timeout=120, verify=(attempt % 2 == 0))
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
-        except requests.exceptions.SSLError:
-            continue
+        except requests.exceptions.SSLError as e:
+            last = e
+            time.sleep(min(6, 1.0 * (attempt + 1)))
         except Exception as e:
-            print(f"  [Vision] Qwen error: {e}")
-            return None
+            last = e
+            time.sleep(min(6, 1.0 * (attempt + 1)))
+    print(f"  [Vision] Qwen error after retries: {last}")
     return None
 
 
