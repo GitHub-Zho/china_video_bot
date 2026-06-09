@@ -30,8 +30,39 @@ from config.settings import (
 load_dotenv()
 
 GROQ_MODEL = "llama-3.3-70b-versatile"
+QWEN_TEXT_MODEL = "qwen-max"   # DashScope — China-direct, no VPN
 CRITIC_PASS_SCORE = 7
 MAX_RETRIES = 2
+
+
+def _llm_chat(system: str, user: str, temperature: float = 0.75,
+              max_tokens: int = 1800) -> str:
+    """
+    Text generation for the Director/Critic. Prefers Qwen (DashScope) when its key
+    is set — China-direct, reliable — else falls back to Groq. Raises on failure.
+    """
+    dash = os.getenv("DASHSCOPE_API_KEY")
+    if dash:
+        import requests, urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        r = requests.post(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            headers={"Authorization": f"Bearer {dash}", "Content-Type": "application/json"},
+            json={"model": QWEN_TEXT_MODEL,
+                  "messages": [{"role": "system", "content": system},
+                               {"role": "user", "content": user}],
+                  "temperature": temperature, "max_tokens": max_tokens},
+            verify=False, timeout=90)
+        r.raise_for_status()
+        return r.choices[0].message.content if hasattr(r, "choices") \
+            else r.json()["choices"][0]["message"]["content"]
+    # Fallback: Groq
+    resp = Groq(api_key=os.getenv("GROQ_API_KEY")).chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[{"role": "system", "content": system},
+                  {"role": "user", "content": user}],
+        temperature=temperature, max_tokens=max_tokens)
+    return resp.choices[0].message.content
 
 # Narration length targets (words). Short punchy lines are GOOD for Reels —
 # 4 words ("Twenty dollars a plate") is fine; we only block 1-3 word filler
@@ -283,20 +314,20 @@ Return ONLY valid JSON — no markdown, no explanation:
 }}"""
 
 _CRITIC_SYSTEM = """\
-Score this travel video script on 5 criteria (1-10 each):
-  hook        — does scene 0 make someone stop scrolling? (needs 10-15 words, surprising fact)
-  specificity — are real, specific China locations/facts named? (generic = score 1-3)
-  word_count  — do ALL scenes have 10-15 words? Scenes with <8 words score 1; 8-10 words score 5
-  reels_fit   — conversational, not documentary? Does it sound like a real person talking?
-  variety     — do scenes cover different aspects (city/nature/culture/food/history)?
+Score this SHORT-FORM Reels/Shorts script on 5 criteria (1-10 each).
+SHORT, punchy lines (4-10 words) are GOOD here — do NOT penalise brevity.
+  hook        — does scene 0 stop the scroll? (a question, sensory tease, or insider contrast)
+  specificity — concrete subject/detail (a real dish, place, or action), not vague filler
+  punch       — are lines tight and craveable (4-10 words)? Penalise ONLY 1-3 word filler
+                like "Explore the unknown", and overly long documentary sentences
+  reels_fit   — sounds like a real enthusiast, not a brochure or an ad ("come to X / I'll take you" = bad)
+  cohesion    — do all scenes stay on the ONE topic (no drift to unrelated places)?
 
-CRITICAL: If ANY scene has fewer than 8 words, the word_count score must be 1-3.
-CRITICAL: Narrations like "Explore the unknown" or "Visit ancient villages" are FAILURES (too short).
-
-overall = average of all 5 scores (round to nearest integer).
+overall = average of the 5 scores (round to nearest integer). A clean punchy
+on-topic script should score 7-9.
 
 Return ONLY JSON:
-{{"hook":<n>,"specificity":<n>,"word_count":<n>,"reels_fit":<n>,"variety":<n>,
+{{"hook":<n>,"specificity":<n>,"punch":<n>,"reels_fit":<n>,"cohesion":<n>,
   "overall":<n>,"feedback":"<2 sentences naming exactly what to fix>"}}"""
 
 
@@ -465,17 +496,8 @@ def _generate_brief_via_groq(
             f"Improve based on: {critique_feedback}"
         )
 
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    resp = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user",   "content": "\n\n".join(user_parts)},
-        ],
-        temperature=0.75,
-        max_tokens=1800,
-    )
-    raw = resp.choices[0].message.content.strip()
+    raw = _llm_chat(system, "\n\n".join(user_parts),
+                    temperature=0.75, max_tokens=1800).strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -536,20 +558,11 @@ def _generate_brief_via_groq(
 def _critique_brief(brief: CreativeBrief) -> tuple[int, str]:
     """Returns (score, feedback). Score < CRITIC_PASS_SCORE means retry."""
     try:
-        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         narration_preview = "\n".join(
             f"Scene {s.index}: {s.narration}" for s in brief.scenes[:6]
         )
-        resp = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": _CRITIC_SYSTEM},
-                {"role": "user",   "content": narration_preview},
-            ],
-            temperature=0.2,
-            max_tokens=300,
-        )
-        raw = resp.choices[0].message.content.strip()
+        raw = _llm_chat(_CRITIC_SYSTEM, narration_preview,
+                        temperature=0.2, max_tokens=300).strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -560,7 +573,7 @@ def _critique_brief(brief: CreativeBrief) -> tuple[int, str]:
         status = "✅ PASS" if score >= CRITIC_PASS_SCORE else "❌ FAIL"
         print(f"  [Director/Critic] Score: {score}/10 {status}  "
               f"hook={data.get('hook')} spec={data.get('specificity')} "
-              f"words={data.get('word_count')} reels={data.get('reels_fit')}")
+              f"punch={data.get('punch')} reels={data.get('reels_fit')}")
         if score < CRITIC_PASS_SCORE:
             print(f"  [Director/Critic] → {feedback}")
         return score, feedback
@@ -595,7 +608,8 @@ def create_brief(
     brief = None
     last_attempt = None   # last brief produced, even if it failed validation
     for attempt in range(MAX_RETRIES + 1):
-        label = "Calling Groq" if attempt == 0 else f"Retry {attempt}/{MAX_RETRIES}"
+        prov = "Qwen" if os.getenv("DASHSCOPE_API_KEY") else "Groq"
+        label = f"Calling {prov}" if attempt == 0 else f"Retry {attempt}/{MAX_RETRIES}"
         print(f"  [Director] {label} (target={target_seconds:.0f}s, "
               f"scenes={math.ceil(target_seconds / SLIDE_DURATION)})…")
         try:
