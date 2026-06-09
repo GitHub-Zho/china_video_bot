@@ -22,6 +22,30 @@ from config.settings import (
 
 # ── AI image generation (Wanxiang via DashScope) — last-resort footage ────────
 
+def _dashscope_req(method: str, url: str, retries: int = 5, **kwargs):
+    """
+    DashScope HTTP call that survives the intermittent SSL EOF drops seen on
+    flaky/proxied China connections. Retries with verify toggling; raises the
+    last error only after exhausting all attempts. Returns the Response.
+
+    This is critical for Wanxiang generation: the async task is SUBMITTED fine,
+    but a single SSL drop while POLLING used to throw away the whole (already
+    succeeding) generation — leaving only generic stock footage in the pool.
+    """
+    last = None
+    for attempt in range(retries):
+        try:
+            kwargs.setdefault("timeout", 40)
+            kwargs["verify"] = (attempt % 2 == 0)
+            r = requests.request(method, url, **kwargs)
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            last = e
+            time.sleep(min(6, 1.0 * (attempt + 1)))
+    raise last
+
+
 def generate_images_wanx(prompt: str, n: int, out_dir: Path) -> list[str]:
     """
     Generate `n` images with Alibaba's Wanxiang (通义万相) text-to-image, used only
@@ -39,16 +63,20 @@ def generate_images_wanx(prompt: str, n: int, out_dir: Path) -> list[str]:
             "input": {"prompt": full_prompt},
             "parameters": {"n": n, "size": "1280*720"}}
     try:
-        r = requests.post(
+        r = _dashscope_req(
+            "POST",
             "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis",
-            headers=headers, json=body, verify=False, timeout=30)
-        r.raise_for_status()
+            headers=headers, json=body, timeout=30)
         tid = r.json()["output"]["task_id"]
         poll_h = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}"}
         for _ in range(30):
             time.sleep(3)
-            p = requests.get(f"https://dashscope.aliyuncs.com/api/v1/tasks/{tid}",
-                             headers=poll_h, verify=False, timeout=30).json()
+            try:
+                p = _dashscope_req(
+                    "GET", f"https://dashscope.aliyuncs.com/api/v1/tasks/{tid}",
+                    retries=3, headers=poll_h, timeout=30).json()
+            except Exception:
+                continue   # a transient drop must NOT abort an in-flight task
             st = p.get("output", {}).get("task_status")
             if st == "SUCCEEDED":
                 out = []
@@ -56,7 +84,10 @@ def generate_images_wanx(prompt: str, n: int, out_dir: Path) -> list[str]:
                     u = x.get("url")
                     if not u:
                         continue
-                    data = requests.get(u, verify=False, timeout=40).content
+                    try:
+                        data = _dashscope_req("GET", u, retries=4, timeout=60).content
+                    except Exception:
+                        continue
                     if len(data) > 5000:
                         pth = out_dir / f"gen_{i}.jpg"
                         pth.write_bytes(data)
@@ -84,22 +115,29 @@ def generate_video_wanx(prompt: str, out_dir: Path) -> str | None:
             "input": {"prompt": f"{prompt}, authentic China, cinematic, realistic, appetizing"},
             "parameters": {"size": "1280*720"}}
     try:
-        r = requests.post(
+        r = _dashscope_req(
+            "POST",
             "https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis",
-            headers=headers, json=body, verify=False, timeout=30)
-        r.raise_for_status()
+            headers=headers, json=body, timeout=30)
         tid = r.json()["output"]["task_id"]
         poll_h = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}"}
         for _ in range(40):
             time.sleep(5)
-            p = requests.get(f"https://dashscope.aliyuncs.com/api/v1/tasks/{tid}",
-                             headers=poll_h, verify=False, timeout=30).json()
+            try:
+                p = _dashscope_req(
+                    "GET", f"https://dashscope.aliyuncs.com/api/v1/tasks/{tid}",
+                    retries=3, headers=poll_h, timeout=30).json()
+            except Exception:
+                continue   # a transient drop must NOT abort an in-flight task
             st = p.get("output", {}).get("task_status")
             if st == "SUCCEEDED":
                 u = p["output"].get("video_url")
                 if not u:
                     return None
-                data = requests.get(u, verify=False, timeout=120).content
+                try:
+                    data = _dashscope_req("GET", u, retries=4, timeout=120).content
+                except Exception:
+                    return None
                 if len(data) > 50_000:
                     pth = out_dir / "genvideo.mp4"
                     pth.write_bytes(data)

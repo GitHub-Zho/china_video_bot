@@ -51,19 +51,21 @@ def _llm_chat(system: str, user: str, temperature: float = 0.75,
                    "temperature": temperature, "max_tokens": max_tokens}
         headers = {"Authorization": f"Bearer {dash}", "Content-Type": "application/json"}
         last = None
-        # Retry — DashScope over a flaky/proxied connection sometimes drops with
-        # SSL EOF; a transient fail must NOT silently fall back to a generic template.
-        for attempt in range(6):
+        # Retry hard — DashScope over a flaky/proxied connection drops big requests
+        # with SSL EOF; a transient fail must NOT silently fall back to a generic
+        # template (which would lose the user's topic).
+        sess = requests.Session()
+        for attempt in range(10):
             try:
-                r = requests.post(
+                r = sess.post(
                     "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
                     headers=headers, json=payload,
-                    verify=(attempt == 0), timeout=90)
+                    verify=(attempt % 2 == 0), timeout=90)
                 r.raise_for_status()
                 return r.json()["choices"][0]["message"]["content"]
             except Exception as e:
                 last = e
-                time.sleep(1.5 * (attempt + 1))
+                time.sleep(min(8, 1.0 * (attempt + 1)))
         raise last
     # Fallback: Groq
     resp = Groq(api_key=os.getenv("GROQ_API_KEY")).chat.completions.create(
