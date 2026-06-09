@@ -43,19 +43,28 @@ def _llm_chat(system: str, user: str, temperature: float = 0.75,
     """
     dash = os.getenv("DASHSCOPE_API_KEY")
     if dash:
-        import requests, urllib3
+        import time, requests, urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        r = requests.post(
-            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-            headers={"Authorization": f"Bearer {dash}", "Content-Type": "application/json"},
-            json={"model": QWEN_TEXT_MODEL,
-                  "messages": [{"role": "system", "content": system},
-                               {"role": "user", "content": user}],
-                  "temperature": temperature, "max_tokens": max_tokens},
-            verify=False, timeout=90)
-        r.raise_for_status()
-        return r.choices[0].message.content if hasattr(r, "choices") \
-            else r.json()["choices"][0]["message"]["content"]
+        payload = {"model": QWEN_TEXT_MODEL,
+                   "messages": [{"role": "system", "content": system},
+                                {"role": "user", "content": user}],
+                   "temperature": temperature, "max_tokens": max_tokens}
+        headers = {"Authorization": f"Bearer {dash}", "Content-Type": "application/json"}
+        last = None
+        # Retry — DashScope over a flaky/proxied connection sometimes drops with
+        # SSL EOF; a transient fail must NOT silently fall back to a generic template.
+        for attempt in range(6):
+            try:
+                r = requests.post(
+                    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+                    headers=headers, json=payload,
+                    verify=(attempt == 0), timeout=90)
+                r.raise_for_status()
+                return r.json()["choices"][0]["message"]["content"]
+            except Exception as e:
+                last = e
+                time.sleep(1.5 * (attempt + 1))
+        raise last
     # Fallback: Groq
     resp = Groq(api_key=os.getenv("GROQ_API_KEY")).chat.completions.create(
         model=GROQ_MODEL,
