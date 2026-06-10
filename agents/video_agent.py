@@ -17,6 +17,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import re
+
 from config.settings import (
     YOUTUBE_W, YOUTUBE_H, REELS_W, REELS_H,
     FPS, SLIDE_DURATION, FADE_DURATION, OUTPUT_DIR,
@@ -75,6 +77,73 @@ def _subtitle_mode() -> str:
     return _SUBTITLE_MODE
 
 
+# ── Smart portrait crop: subject-aware x offset ───────────────────────────────
+
+def _find_subject_x_fraction(image_path: str) -> float:
+    """
+    Ask Qwen-VL where the main subject sits horizontally in the image.
+    Returns a float 0.0 (far left) → 1.0 (far right).  Default: 0.5 (center).
+
+    Used when cropping a LANDSCAPE frame into a PORTRAIT strip (Reels 9:16).
+    The returned fraction is applied as:
+        crop_x = (scaled_width - crop_width) * fraction
+    so 0.0 crops from the left edge, 0.5 from center, 1.0 from the right edge.
+
+    Gracefully returns 0.5 if vision is unavailable or the image doesn't exist.
+    """
+    from pathlib import Path as _P
+    if not _P(image_path).exists():
+        return 0.5
+    try:
+        from agents.vision import analyse_images
+        prompt = (
+            "Look at this image. Where is the MAIN SUBJECT or focal point "
+            "positioned HORIZONTALLY?\n\n"
+            "Reply with a single integer from 0 to 10:\n"
+            "  0-1 = far LEFT\n"
+            "  2-3 = left of center\n"
+            "  4-6 = CENTER\n"
+            "  7-8 = right of center\n"
+            "  9-10 = far RIGHT\n\n"
+            "Reply with ONLY the number. Nothing else."
+        )
+        resp = analyse_images([image_path], prompt, temperature=0.1, max_tokens=4)
+        if resp:
+            m = re.search(r'\b(\d+)\b', resp.strip())
+            if m:
+                score = max(0, min(10, int(m.group(1))))
+                frac  = round(score / 10.0, 2)
+                return frac
+    except Exception:
+        pass
+    return 0.5
+
+
+def _find_subject_x_fraction_from_video(video_path: str, start_sec: float = 0.0) -> float:
+    """
+    Extract a single representative frame from a video clip and call
+    _find_subject_x_fraction on it.  Falls back to 0.5 on any error.
+    """
+    import tempfile as _tmp
+    frame_file = _tmp.mktemp(suffix="_subj.jpg")
+    try:
+        seek = max(0.0, start_sec)
+        r = subprocess.run(
+            [FFMPEG_BIN, "-y",
+             "-ss", f"{seek:.2f}", "-i", video_path,
+             "-frames:v", "1", "-q:v", "3", frame_file],
+            capture_output=True, timeout=15,
+        )
+        if r.returncode == 0 and Path(frame_file).exists():
+            frac = _find_subject_x_fraction(frame_file)
+            return frac
+    except Exception:
+        pass
+    finally:
+        Path(frame_file).unlink(missing_ok=True)
+    return 0.5
+
+
 # ── Per-item clip generation ───────────────────────────────────────────────────
 
 _XFADE = 0.3   # seconds — gentle fade-in/out on each scene (soft transitions)
@@ -100,17 +169,35 @@ def _make_clip_from_video(src: str, w: int, h: int, duration: float,
     """
     Trim + scale-crop a video clip to (w,h), no black bars.
 
-    start_sec: where in the source clip to begin (chosen by pick_clip_segment).
-               0.0 = start from the beginning (default / photos / AI-generated).
+    start_sec : where in the source clip to begin (chosen by pick_clip_segment).
+    Portrait output (Reels 1080×1920): Qwen-VL determines the crop x so the
+    main subject isn't blindly center-cropped out of frame.
     """
-    vf = (
-        f"scale={w}:{h}:force_original_aspect_ratio=increase,"
-        f"crop={w}:{h},setsar=1"
-        f"{_fade_suffix(duration)}"
-    )
+    portrait = h > w   # True for Reels (1080×1920)
+
+    if portrait:
+        # Landscape → portrait: scale to fill height, then smart-crop a
+        # vertical strip.  x_frac from Qwen-VL positions the crop on the subject.
+        x_frac  = _find_subject_x_fraction_from_video(src, start_sec)
+        x_expr  = f"(iw-{w})*{x_frac:.3f}"
+        vf = (
+            f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h}:{x_expr}:0,setsar=1"
+            f"{_fade_suffix(duration)}"
+        )
+        print(f"    [Crop] portrait video — subject x={x_frac:.2f} "
+              f"({'left' if x_frac < 0.4 else 'right' if x_frac > 0.6 else 'center'})")
+    else:
+        # Landscape → landscape: center crop (small crop, fine as-is)
+        vf = (
+            f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h},setsar=1"
+            f"{_fade_suffix(duration)}"
+        )
+
     cmd = [
         FFMPEG_BIN, "-y",
-        "-ss", str(start_sec),   # seek to the Qwen-VL-selected start point
+        "-ss", str(start_sec),   # seek to Qwen-VL-selected start point
         "-i", src,
         "-t", str(duration),
         "-vf", vf,
@@ -139,13 +226,15 @@ def _make_clip_from_photo(src: str, w: int, h: int, duration: float,
 
     portrait = h > w  # True for Reels (1080×1920), False for YouTube (1920×1080)
     if portrait:
-        # For landscape → portrait: scale to height, center-crop a vertical strip,
-        # then zoompan on the already-portrait crop. This preserves content proportions.
-        # scale=-1:8000  keeps aspect ratio (wider than 8000 tall)
-        # crop: take the center vertical strip of width = height*(w/h)
+        # Landscape photo → portrait frame: scale tall, then smart-crop a vertical
+        # strip using Qwen-VL's subject position rather than always centering.
+        x_frac   = _find_subject_x_fraction(src)
+        x_crop   = f"(iw-ih*{w}/{h})*{x_frac:.3f}"
+        print(f"    [Crop] portrait photo — subject x={x_frac:.2f} "
+              f"({'left' if x_frac < 0.4 else 'right' if x_frac > 0.6 else 'center'})")
         vf = (
             f"scale=-1:8000,"
-            f"crop=w='ih*{w}/{h}':h=ih:x='(iw-ih*{w}/{h})/2':y=0,"
+            f"crop=w='ih*{w}/{h}':h=ih:x='{x_crop}':y=0,"
             f"zoompan=z='min(zoom+0.0015,1.4)':"
             f"x='{x_expr}':y='{y_expr}':"
             f"d={n_frames}:s={w}x{h}:fps={FPS},"
