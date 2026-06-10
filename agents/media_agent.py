@@ -413,61 +413,8 @@ def _search_unsplash_photo(query: str) -> str | None:
         return None
 
 
-# ── Vision selection (优中选优) ─────────────────────────────────────────────────
-
-def _pick_best_candidate(candidates: list[dict], query: str) -> dict | None:
-    """
-    Use the verifier (Gemini) to pick the candidate whose PREVIEW best matches
-    the scene query. Downloads only tiny preview thumbnails (cheap), not clips.
-
-    Returns the chosen candidate dict, or None to let the caller fall back to
-    "first unused" ordering (when vision is unavailable or no preview).
-    """
-    import tempfile, shutil
-    from agents.vision import vision_available, analyse_images_json
-
-    if not vision_available():
-        return None
-
-    with_preview = [c for c in candidates if c.get("preview")][:6]
-    if len(with_preview) < 2:
-        return None   # nothing to choose between — caller uses first unused
-
-    prev_dir = Path(tempfile.mkdtemp(prefix="prev_"))
-    try:
-        paths, kept = [], []
-        for i, c in enumerate(with_preview):
-            data = _download_bytes(c["preview"])
-            if data:
-                pth = prev_dir / f"prev_{i}.jpg"
-                pth.write_bytes(data)
-                paths.append(str(pth))
-                kept.append(c)
-        if len(kept) < 2:
-            return None
-
-        labels = [f"[Candidate {i}]" for i in range(len(kept))]
-        prompt = (
-            f"Each image is a candidate stock-video preview for this scene:\n"
-            f'"{query}"\n\n'
-            f"Pick the candidate that best matches the scene — correct subject, clearly "
-            f"China travel footage. Also rate how well it actually matches (0-10).\n"
-            f'Return ONLY JSON: {{"best": <number>, "score": <0-10>, "why": "<short>"}}'
-        )
-        result = analyse_images_json(paths, prompt, labels)
-        if isinstance(result, dict) and isinstance(result.get("best"), int):
-            idx = result["best"]
-            if 0 <= idx < len(kept):
-                chosen = dict(kept[idx])
-                chosen["score"] = result.get("score", 0)
-                return chosen
-        return None
-    finally:
-        shutil.rmtree(prev_dir, ignore_errors=True)
-
-
 def compete_and_apply(video_id: str, scene_index: int, search_query: str,
-                      narration: str, gen_prompt: str = "", min_score: int = 5,
+                      narration: str, gen_prompt: str = "", min_score: int = 6,
                       make_video: bool = False, used_ids: set | None = None,
                       reference_frames: list | None = None,
                       used_ref_paths: set | None = None) -> str | None:
@@ -746,7 +693,7 @@ def pre_check_and_fix_media(
             narr = match_descriptions[idx] if idx < len(match_descriptions) else ""
             kind = compete_and_apply(
                 video_id, idx, narr, narr, gen_prompt=gp,
-                min_score=5, make_video=True, reference_frames=reference_frames,
+                min_score=6, make_video=True, reference_frames=reference_frames,
             )
             if kind:
                 clip  = media_dir / f"{idx:02d}.mp4"
@@ -814,15 +761,19 @@ def download_media(video_id: str, queries: list[str],
         print(f"  [Media] {i+1}/{len(target)} '{china_q}'…")
         time.sleep(API_CALL_DELAY)
 
-        # ── Preferred: stock + AI-image COMPETE, Qwen picks best ──────────
-        # Uses the rich Art-Director gen_prompt so AI generation has full context.
+        # ── Preferred: Wanxiang AI + stock COMPETE, Qwen-VL picks best ────
+        # Wanxiang always generates from the Art Director's rich gen_prompt, so
+        # it should produce exactly the right subject. Stock thumbnails are less
+        # reliable — a "meat slicing" preview might score 8/10 for a "Peking duck
+        # skin" scene because the thumbnail looks generically food-like. Having an
+        # on-topic AI image in the pool gives Qwen a clearly correct option.
         gp = gen_prompts[i] if gen_prompts and i < len(gen_prompts) else ""
         kind = compete_and_apply(video_id, i, query, judge_q, gen_prompt=gp,
-                                 min_score=5, make_video=False, used_ids=used_video_ids,
+                                 min_score=6, make_video=False, used_ids=used_video_ids,
                                  reference_frames=reference_frames,
                                  used_ref_paths=used_ref_paths)
         if kind == "genvideo":
-            # AI-generated video: short + purpose-built for the scene, no analysis needed
+            # AI-generated video: purpose-built for the scene, no segment analysis needed
             items.append(MediaItem(str(clip_path), "clip", start_sec=0.0))
             continue
         if kind == "clip":
@@ -831,7 +782,6 @@ def download_media(video_id: str, queries: list[str],
             items.append(MediaItem(str(clip_path), "clip", start_sec=start))
             continue
         if kind == "reference":
-            # compete_and_apply wrote either .mp4 (real clip) or .jpg (static frame)
             if clip_path.exists() and clip_path.stat().st_size > 50_000:
                 items.append(MediaItem(str(clip_path), "clip"))
             elif photo_path.exists():
@@ -841,28 +791,60 @@ def download_media(video_id: str, queries: list[str],
             items.append(MediaItem(str(photo_path), "photo"))
             continue
 
-        # ── Fallback (vision unavailable): first stock clip, then photo ────
-        candidates = _search_pexels_video_candidates(china_q)
-        candidates += _search_pixabay_video_candidates(china_q)
-        fresh = [c for c in candidates if c["id"] not in used_video_ids] or candidates
-        if fresh:
-            data = _download_bytes(fresh[0]["url"])
-            if data and len(data) > 50_000:
-                clip_path.write_bytes(data)
-                used_video_ids.add(fresh[0]["id"])
-                print(f"      clip ✓ ({len(data)//1024}KB)")
-                # Analyze segment even in fallback — stock clips need it most
-                start = pick_clip_segment(str(clip_path), judge_q)
-                items.append(MediaItem(str(clip_path), "clip", start_sec=start))
-                continue
-        photo_url = _search_pexels_photo(china_q) or _search_unsplash_photo(china_q)
-        if photo_url:
-            data = _download_bytes(photo_url)
-            if data and len(data) > 5_000:
-                photo_path.write_bytes(data)
-                items.append(MediaItem(str(photo_path), "photo"))
-                continue
-        print("      skipped (no result)")
+        # ── No candidate scored ≥ 6/10 ──────────────────────────────────────
+        # Determine WHY compete_and_apply returned None so we pick the right fallback.
+        from agents.vision import vision_available as _va
+        if not _va():
+            # Vision is offline — we can't score anything, so use the first available
+            # stock clip as a best-effort placeholder.
+            candidates = _search_pexels_video_candidates(china_q)
+            candidates += _search_pixabay_video_candidates(china_q)
+            fresh = [c for c in candidates if c["id"] not in used_video_ids] or candidates
+            if fresh:
+                data = _download_bytes(fresh[0]["url"])
+                if data and len(data) > 50_000:
+                    clip_path.write_bytes(data)
+                    used_video_ids.add(fresh[0]["id"])
+                    start = pick_clip_segment(str(clip_path), judge_q)
+                    items.append(MediaItem(str(clip_path), "clip", start_sec=start))
+                    continue
+            photo_url = _search_pexels_photo(china_q) or _search_unsplash_photo(china_q)
+            if photo_url:
+                data = _download_bytes(photo_url)
+                if data and len(data) > 5_000:
+                    photo_path.write_bytes(data)
+                    items.append(MediaItem(str(photo_path), "photo"))
+                    continue
+            print(f"  [Media] {i+1}: skipped (vision offline, no stock found)")
+            continue
+
+        # Vision ran but nothing scored ≥ 6 — this typically means Wanxiang failed
+        # AND stock thumbnails don't match the narration.
+        # Inserting a mismatched clip is worse than reusing an adjacent scene's media:
+        # the viewer's eye finds a repeated clip less jarring than a completely wrong one.
+        if items:
+            prev = items[-1]
+            items.append(MediaItem(prev.path, prev.kind,
+                                   start_sec=getattr(prev, "start_sec", 0.0)))
+            print(f"  [Media] {i+1}/{len(target)}: no match ≥6/10 — "
+                  f"extending scene {len(items)-2} media (avoids off-topic clip)")
+            continue
+
+        # First scene and still no match: try once more with a lower threshold (4)
+        # before giving up entirely.  This only runs for scene 0 since later scenes
+        # have the adjacent-reuse path above.
+        print(f"  [Media] {i+1}: scene 0 no match — retrying with threshold 4…")
+        kind = compete_and_apply(video_id, i, query, judge_q, gen_prompt=gp,
+                                 min_score=4, make_video=False, used_ids=used_video_ids)
+        if kind == "clip":
+            start = pick_clip_segment(str(clip_path), judge_q)
+            items.append(MediaItem(str(clip_path), "clip", start_sec=start))
+            continue
+        if kind in ("image", "genvideo", "reference"):
+            m_path = clip_path if clip_path.exists() else photo_path
+            items.append(MediaItem(str(m_path), "clip" if m_path.suffix == ".mp4" else "photo"))
+            continue
+        print(f"  [Media] {i+1}: skipped (no result above threshold 4)")
 
     clips  = sum(1 for m in items if m.kind == "clip")
     photos = sum(1 for m in items if m.kind == "photo")
