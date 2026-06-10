@@ -473,6 +473,7 @@ def _generate_brief_via_groq(
     guidelines: str = "",
     prompt: str = "",
     video_type: str = "growth",
+    video_understanding=None,   # VideoUnderstanding | None
 ) -> CreativeBrief:
     n_scenes     = math.ceil(target_seconds / SLIDE_DURATION)
     secs_per     = round(target_seconds / n_scenes, 1)
@@ -500,6 +501,12 @@ def _generate_brief_via_groq(
             f"Pick the best audience type (explorer or newcomer) and topic for today. "
             f"Return the complete JSON object as specified."
         )
+    # Mode 2: inject video understanding BEFORE the topic prompt so it acts as
+    # ground truth for the Director.  The to_director_prompt() block contains
+    # the ordered steps and an explicit instruction to write from real content.
+    if video_understanding is not None:
+        user_parts.insert(0, video_understanding.to_director_prompt())
+
     if prompt:
         user_parts.insert(0,
             f"CREATIVE DIRECTION FROM USER (highest priority — the video MUST be "
@@ -617,17 +624,25 @@ def create_brief(
     target_seconds: float | None = None,
     prompt: str = "",
     video_type: str = "growth",
+    video_understanding=None,   # VideoUnderstanding | None  (Mode 2)
 ) -> CreativeBrief:
     """
-    Create a scene-by-scene creative brief. Uses Groq with critic loop.
-    Falls back to curated templates if Groq is unavailable.
+    Create a scene-by-scene creative brief. Uses Qwen/Groq with critic loop.
+    Falls back to curated templates if LLM is unavailable.
 
-    prompt:     optional free-text creative direction.
-    video_type: "growth" (hook/engagement) or "info" (educational story).
+    prompt:              optional free-text creative direction.
+    video_type:          "growth" (hook/engagement) or "info" (educational story).
+    video_understanding: (Mode 2) VideoUnderstanding from video_analyst_agent.
+                         When provided, the Director writes from actual video steps
+                         instead of freely inventing. Auto-switches to "info" format.
     target_seconds defaults to TARGET_YOUTUBE_SECONDS from settings.
     """
     if target_seconds is None:
         target_seconds = float(TARGET_YOUTUBE_SECONDS)
+
+    # Mode 2: video-grounded scripts read better as "info" (teaching voice)
+    if video_understanding is not None and video_type == "growth":
+        video_type = "info"
 
     insights   = _load_insights()
     guidelines = _load_guidelines(video_type)   # format-aware rules
@@ -644,6 +659,7 @@ def create_brief(
             brief = _generate_brief_via_groq(
                 audience_type, target_seconds, feedback, insights, guidelines, prompt,
                 video_type=video_type,
+                video_understanding=video_understanding,
             )
             last_attempt = brief
         except BriefValidationError as e:

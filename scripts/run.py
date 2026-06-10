@@ -2,19 +2,22 @@
 """
 China Video Bot — command-line entry point.
 
-Designed for autonomous server operation (AWS / Oracle). No Claude in the loop:
-the pipeline self-drives with Groq (generation) + Gemini (verification) + Kokoro
-(voice) + Pexels/Pixabay (media).
+MODE 1 — topic-driven (original):
+  python scripts/run.py --prompt "Beijing roast duck" --dry-run
+  Director invents scenes freely from the topic.
 
-Usage:
-  python scripts/run.py                                  # daily auto mode (publishes)
-  python scripts/run.py --dry-run                        # build locally, no upload
-  python scripts/run.py --prompt "Chengdu hot pot"       # topic-driven
-  python scripts/run.py --prompt "..." --audience newcomer
+MODE 2 — video-grounded (new):
+  python scripts/run.py --from-video https://www.bilibili.com/video/BV... \\
+                        --topic "Beijing Roast Duck preparation" --dry-run
+  Downloads the video, Qwen-VL reads every step, Director writes from real content.
+  Higher accuracy for process/how-to content; reference frames used as preferred media.
+
+Other modes:
   python scripts/run.py --from-folder ~/my_photos --dry-run   # user's own media
-  python scripts/run.py --seconds 24                     # override target length
+  python scripts/run.py --from-brief output/<id>/brief.json   # build approved script
+  python scripts/run.py --fix <id> --scene N --pick K         # swap a QA-flagged clip
 
-Exit code 0 on success, 1 on failure (so cron / CI can detect problems).
+Exit code 0 on success, 1 on failure.
 """
 import argparse
 import sys
@@ -55,8 +58,18 @@ def main() -> int:
     parser.add_argument("--pick", type=int, default=None, help="Alternative index to use (with --fix)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Assemble locally, skip YouTube upload")
+    # ── Mode 2: video-grounded pipeline ──────────────────────────────────────
+    parser.add_argument("--from-video", metavar="URL", default=None,
+                        help="Mode 2: URL of a Bilibili/YouTube video to analyse and base the script on. "
+                             "Qwen-VL reads the video step by step, then Director writes from real content.")
+    parser.add_argument("--topic", default="",
+                        help="Topic label for --from-video analysis "
+                             "(e.g. 'Beijing Roast Duck preparation')")
+    parser.add_argument("--sample-interval", type=float, default=4.0,
+                        help="Seconds between sampled frames when analysing --from-video (default 4)")
+    # ── Mode 1 reference footage ──────────────────────────────────────────────
     parser.add_argument("--reference-url", metavar="URL", default=None,
-                        help="B站/YouTube URL to extract reference footage from")
+                        help="B站/YouTube URL to extract reference footage from (Mode 1 only)")
     parser.add_argument("--time-range", metavar="START-END", default=None,
                         help="Continuous time range to scan, e.g. '7:40-8:10'. "
                              "Downloads the whole segment once, auto-samples frames every 2.5s. "
@@ -67,6 +80,24 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        # ── Mode 2: video-grounded ────────────────────────────────────────────
+        if args.from_video:
+            from orchestrator import run_pipeline_from_video
+            result = run_pipeline_from_video(
+                url=args.from_video,
+                topic=args.topic or args.prompt,
+                dry_run=args.dry_run,
+                review=args.review,
+                target_seconds=args.seconds,
+                sample_interval=args.sample_interval,
+            )
+            if isinstance(result, dict):
+                for k, v in result.items():
+                    print(f"   {k}: {v}")
+                return 0
+            print(f"\n[run.py] ✅ Done: {result}")
+            return 0 if result else 1
+
         # Build from an approved/edited script
         if args.from_brief:
             from orchestrator import run_pipeline_from_brief

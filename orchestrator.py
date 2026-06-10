@@ -545,3 +545,119 @@ def run_pipeline_from_folder(
     yt_id = upload_video(video_paths["youtube"], metadata)
     print(f"\n✅ Done!  https://www.youtube.com/watch?v={yt_id}\n")
     return yt_id
+
+
+# ── Mode 2: video-grounded pipeline ──────────────────────────────────────────
+
+def run_pipeline_from_video(
+    url: str,
+    topic: str = "",
+    dry_run: bool = False,
+    review: bool = False,
+    target_seconds: float | None = None,
+    sample_interval: float = 4.0,
+) -> str:
+    """
+    Mode 2 pipeline — write a script grounded in real video content.
+
+    Unlike Mode 1 (topic → Director freely invents), Mode 2:
+      1. Downloads the reference video (Bilibili / YouTube / any yt-dlp source)
+      2. Samples frames and uses Qwen-VL to understand each step
+      3. Extracts clean reference frames at the key step timestamps for use as media
+      4. Passes the structured VideoUnderstanding to the Director so the script
+         is written from actual observed content, not hallucinated generics
+      5. Runs the standard Voice → Media → Assemble → QA → Publish pipeline
+
+    url:             Bilibili/YouTube URL (anything yt-dlp supports)
+    topic:           e.g. "Beijing Roast Duck preparation" — guides analysis + Director
+    sample_interval: seconds between sampled frames for analysis (default 4s)
+    review:          if True, stop after script generation for human approval
+    dry_run:         if True, build locally and skip upload
+
+    Example:
+      python scripts/run.py --from-video https://www.bilibili.com/video/BV1EY4y1B7Mc/ \\
+                            --topic "Beijing Roast Duck" --dry-run
+    """
+    from agents.video_analyst_agent import analyze_video
+    from agents.reference_agent     import extract_reference_frames
+
+    vid = _video_id() + "_mode2"
+    print(f"\n{'='*58}")
+    print(f"  China Video Bot  ·  Mode 2 (Video-Grounded)  ·  {vid}")
+    print(f"  URL: {url}")
+    if topic:
+        print(f"  Topic: {topic}")
+    print(f"{'='*58}")
+
+    out_dir = Path(OUTPUT_DIR) / vid
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── 1. Analyse the reference video ───────────────────────────────────────
+    print("\n[1/5] Analysing reference video…")
+    vu = analyze_video(url, topic=topic or "China food / culture",
+                       sample_interval=sample_interval)
+
+    if not vu.steps:
+        print("  ⚠️  Video analysis returned no steps. "
+              "Falling back to Mode 1 (topic-only).")
+        return run_pipeline(prompt=topic, dry_run=dry_run, review=review,
+                            target_seconds=target_seconds)
+
+    # ── 2. Extract clean reference frames at key step timestamps ─────────────
+    # Build timestamp pairs from the understood steps (±1s window per step)
+    print("\n[1b] Extracting reference frames from key moments…")
+    reference_frames: list[str] = []
+    if vu.video_path and Path(vu.video_path).exists():
+        try:
+            # Build a timestamp range string like "0:03-0:10,0:34-0:40,…"
+            step_ranges = []
+            for step in vu.steps:
+                t0 = max(0.0, step.start_sec)
+                t1 = t0 + 6.0   # 6-second window per step
+                m0, s0 = int(t0) // 60, int(t0) % 60
+                m1, s1 = int(t1) // 60, int(t1) % 60
+                step_ranges.append(f"{m0}:{s0:02d}-{m1}:{s1:02d}")
+            timestamps = ",".join(step_ranges[:8])  # cap at 8 ranges
+
+            # extract_reference_frames returns list of frame paths (watermark-stripped)
+            reference_frames = extract_reference_frames(url, timestamps)
+            print(f"  [Ref] {len(reference_frames)} clean reference frames ready")
+        except Exception as e:
+            print(f"  [Ref] ⚠️  Reference frame extraction failed: {e}")
+
+    # ── 3. Director: write grounded script ───────────────────────────────────
+    print("\n[2/5] Director writing grounded script…")
+    brief = create_brief(
+        prompt=topic,
+        target_seconds=target_seconds,
+        video_understanding=vu,
+        video_type="info",   # step-by-step content reads best as "info"
+    )
+    print(f"      Topic    : {brief.topic}  |  Audience: {brief.audience_type}")
+
+    (out_dir / "brief.json").write_text(
+        json.dumps(brief.to_metadata_dict(), indent=2)
+    )
+    (out_dir / "metadata.json").write_text(
+        json.dumps(brief.to_metadata_dict(), indent=2)
+    )
+    # Save video understanding alongside the brief for reference
+    (out_dir / "video_understanding.json").write_text(
+        json.dumps({
+            "url": vu.url, "topic": vu.topic, "summary": vu.summary,
+            "steps": [{"timestamp": s.timestamp, "action": s.action,
+                       "detail": s.detail} for s in vu.steps],
+        }, indent=2, ensure_ascii=False)
+    )
+
+    if review:
+        _print_script(brief)
+        print(f"\n  📋 Mode 2 script saved → output/{vid}/brief.json")
+        print(f"     Video understanding → output/{vid}/video_understanding.json")
+        print(f"     Build it with: python scripts/run.py --from-brief "
+              f"output/{vid}/brief.json{' --dry-run' if dry_run else ''}")
+        return str(out_dir / "brief.json")
+
+    # ── 4–5. Standard build pipeline with reference frames ───────────────────
+    return _build_from_brief(vid, brief, dry_run=dry_run,
+                             reference_frames=reference_frames or None)
