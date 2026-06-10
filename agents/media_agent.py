@@ -359,7 +359,8 @@ def _pick_best_candidate(candidates: list[dict], query: str) -> dict | None:
 def compete_and_apply(video_id: str, scene_index: int, search_query: str,
                       narration: str, gen_prompt: str = "", min_score: int = 5,
                       make_video: bool = False, used_ids: set | None = None,
-                      reference_frames: list | None = None) -> str | None:
+                      reference_frames: list | None = None,
+                      used_ref_paths: set | None = None) -> str | None:
     """
     Core selection: build a pool of STOCK candidates + AI-GENERATED footage (image,
     and optionally a video) + optional REFERENCE frames extracted from a real video
@@ -412,9 +413,10 @@ def compete_and_apply(video_id: str, scene_index: int, search_query: str,
 
         # Reference frames from a real video (B站/YouTube) — all frames enter
         # every scene's pool; Qwen will pick the one that matches each narration best.
+        # Already-used frames are excluded so each real frame is used at most once.
         for rf in (reference_frames or []):
             rf_path = Path(rf)
-            if rf_path.exists():
+            if rf_path.exists() and str(rf_path) not in (used_ref_paths or set()):
                 pool.append({"kind": "reference", "preview": str(rf_path), "img": str(rf_path)})
 
         if not pool:
@@ -461,6 +463,8 @@ def compete_and_apply(video_id: str, scene_index: int, search_query: str,
         elif w["kind"] == "reference":
             (media_dir / f"{scene_index:02d}.mp4").unlink(missing_ok=True)
             shutil.copy(w["img"], media_dir / f"{scene_index:02d}.jpg")
+            if used_ref_paths is not None:
+                used_ref_paths.add(w["img"])  # mark used so next scene gets a different frame
             print(f"      scene {scene_index}: ✅ real reference frame (score {score}/10)")
         else:
             (media_dir / f"{scene_index:02d}.mp4").unlink(missing_ok=True)
@@ -473,12 +477,14 @@ def compete_and_apply(video_id: str, scene_index: int, search_query: str,
 
 def find_replacement_clip(video_id: str, scene_index: int, search_query: str,
                           narration: str, gen_prompt: str = "", min_score: int = 6,
-                          reference_frames: list | None = None) -> bool:
+                          reference_frames: list | None = None,
+                          used_ref_paths: set | None = None) -> bool:
     """QA-escalation: compete stock + AI image + AI VIDEO + reference frames, apply best ≥ min_score."""
     return compete_and_apply(video_id, scene_index, search_query, narration,
                              gen_prompt=gen_prompt, min_score=min_score,
                              make_video=True,
-                             reference_frames=reference_frames) is not None
+                             reference_frames=reference_frames,
+                             used_ref_paths=used_ref_paths) is not None
 
 
 # ── Scene alternatives (human-in-the-loop mismatch fix) ───────────────────────
@@ -559,6 +565,7 @@ def download_media(video_id: str, queries: list[str],
     items: list[MediaItem] = []
     target = queries[:IMAGES_PER_VIDEO]
     used_video_ids: set = set()   # dedup: never use the same clip twice
+    used_ref_paths: set = set()   # dedup: each reference frame used at most once
 
     for i, query in enumerate(target):
         china_q = f"China {query}" if "china" not in query.lower() else query
@@ -586,7 +593,8 @@ def download_media(video_id: str, queries: list[str],
         gp = gen_prompts[i] if gen_prompts and i < len(gen_prompts) else ""
         kind = compete_and_apply(video_id, i, query, judge_q, gen_prompt=gp,
                                  min_score=5, make_video=False, used_ids=used_video_ids,
-                                 reference_frames=reference_frames)
+                                 reference_frames=reference_frames,
+                                 used_ref_paths=used_ref_paths)
         if kind in ("clip", "genvideo"):
             items.append(MediaItem(str(clip_path), "clip"))
             continue

@@ -108,12 +108,11 @@ def extract_reference_frames(url: str,
                 "-frames:v", "1",
                 "-vf", (
                     "scale=960:-1,"
-                    # top strip — covers B站/YouTube channel logo + platform watermark
-                    "drawbox=x=0:y=0:w=iw:h=ih*0.10:color=black:t=fill,"
-                    # top-left block — wider coverage for long channel names
-                    "drawbox=x=0:y=0:w=iw*0.30:h=ih*0.13:color=black:t=fill,"
+                    # top-left block only — covers B站/YouTube channel watermark
+                    # (smaller area so less content is lost)
+                    "drawbox=x=0:y=0:w=iw*0.42:h=ih*0.10:color=black:t=fill,"
                     # bottom strip — covers burned-in subtitles from the source video
-                    "drawbox=x=0:y=ih*0.82:w=iw:h=ih*0.18:color=black:t=fill"
+                    "drawbox=x=0:y=ih*0.84:w=iw:h=ih*0.16:color=black:t=fill"
                 ),
                 str(frame_path),
             ],
