@@ -1,12 +1,14 @@
 """
-One-time YouTube OAuth setup — run this ONCE on your Mac.
-
-Prints a Google login URL → you open it in your browser, approve access,
-paste the authorization code back. Saves credentials locally AND prints
-the three values needed for the Oracle Cloud server .env file.
+One-time YouTube OAuth setup — run this ONCE per channel.
 
 Usage:
-  python scripts/setup_youtube_oauth.py
+  python scripts/setup_youtube_oauth.py                  # single / default account
+  python scripts/setup_youtube_oauth.py --account main   # named account
+  python scripts/setup_youtube_oauth.py --account travel # second channel
+
+Multiple channels: run once per channel with different --account names.
+Credentials are saved to credentials/accounts/yt_{name}.json — no re-auth needed
+after first setup (refresh tokens are permanent).
 
 Prerequisites:
   1. Go to https://console.cloud.google.com
@@ -18,6 +20,7 @@ Prerequisites:
   5. Download JSON → rename to client_secrets.json
   6. Move to: credentials/client_secrets.json  (in this project folder)
 """
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -31,7 +34,31 @@ SCOPES = [
 ]
 
 
+def _update_env(key: str, value: str) -> None:
+    """Upsert KEY=value in .env (creates file if absent)."""
+    env_path = Path(".env")
+    lines = env_path.read_text().splitlines() if env_path.exists() else []
+    updated, found = [], False
+    for line in lines:
+        if line.startswith(f"{key}="):
+            updated.append(f"{key}={value}")
+            found = True
+        else:
+            updated.append(line)
+    if not found:
+        updated.append(f"{key}={value}")
+    env_path.write_text("\n".join(updated) + "\n")
+    print(f"  .env ← {key} updated")
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--account", default="default",
+                        help="Account nickname (e.g. 'main', 'travel'). "
+                             "Saved as credentials/accounts/yt_{name}.json")
+    args = parser.parse_args()
+    account_name = args.account
+
     secrets_path = Path(SECRETS_FILE)
     if not secrets_path.exists():
         print(f"❌  Missing: {SECRETS_FILE}")
@@ -46,33 +73,60 @@ def main():
         sys.exit(1)
 
     from google_auth_oauthlib.flow import InstalledAppFlow
+    import webbrowser
 
-    print("Starting YouTube OAuth (console mode — no browser auto-open)…\n")
+    print(f"Starting YouTube OAuth for account '{account_name}'…\n")
 
     flow = InstalledAppFlow.from_client_secrets_file(SECRETS_FILE, SCOPES)
+    creds = flow.run_local_server(port=0, open_browser=True)
 
-    # run_local_server with open_browser=False: prints the URL, you open it manually
-    creds = flow.run_local_server(port=0, open_browser=False)
-
-    # Extract the three values needed for the server .env
-    secrets_data = json.loads(secrets_path.read_text())
+    # Extract the three values
+    secrets_data  = json.loads(secrets_path.read_text())
     app_type      = "web" if "web" in secrets_data else "installed"
     client_id     = secrets_data[app_type]["client_id"]
     client_secret = secrets_data[app_type]["client_secret"]
     refresh_token = creds.refresh_token
 
-    print("\n" + "="*62)
-    print("✅  OAuth successful!  Add these 3 values to your .env:")
-    print("="*62)
-    print(f"\nYOUTUBE_CLIENT_ID={client_id}")
-    print(f"\nYOUTUBE_CLIENT_SECRET={client_secret}")
-    print(f"\nYOUTUBE_REFRESH_TOKEN={refresh_token}")
-    print("\n" + "="*62)
+    # Get channel info (optional, best-effort)
+    try:
+        from googleapiclient.discovery import build
+        yt = build("youtube", "v3", credentials=creds)
+        ch = yt.channels().list(part="snippet", mine=True).execute()
+        item     = ch.get("items", [{}])[0]
+        ch_name  = item.get("snippet", {}).get("title", "")
+        ch_id    = item.get("id", "")
+    except Exception:
+        ch_name, ch_id = "", ""
 
-    # Save locally for Mac testing
-    Path("credentials").mkdir(exist_ok=True)
-    Path("credentials/token.json").write_text(creds.to_json())
-    print("\nAlso saved → credentials/token.json  (for running pipeline on Mac)")
+    print(f"\n  Channel: {ch_name or '(unknown)'}")
+
+    # ── Save to multi-account store ───────────────────────────────────────────
+    from agents.account_manager import add_youtube_account
+    add_youtube_account(account_name, client_id, client_secret, refresh_token,
+                        channel_name=ch_name, channel_id=ch_id)
+
+    # ── Legacy single-account: also update .env + token.json ────────────────
+    if account_name == "default":
+        try:
+            _update_env("YOUTUBE_CLIENT_ID",     client_id)
+            _update_env("YOUTUBE_CLIENT_SECRET", client_secret)
+            _update_env("YOUTUBE_REFRESH_TOKEN", refresh_token)
+        except Exception:
+            pass
+        Path("credentials/token.json").write_text(creds.to_json())
+        print("  Also updated → credentials/token.json (default account)")
+
+    print("\n" + "="*62)
+    print(f"✅  YouTube account '{account_name}' ready!")
+    print(f"   Channel: {ch_name or '(not retrieved)'}")
+    print("="*62)
+    print("\nServer .env values (add to Oracle Cloud / GitHub Actions):")
+    print(f"  YOUTUBE_CLIENT_ID={client_id}")
+    print(f"  YOUTUBE_CLIENT_SECRET={client_secret}")
+    print(f"  YOUTUBE_REFRESH_TOKEN={refresh_token}")
+    print()
+    print("To add a second channel:")
+    print(f"  python scripts/setup_youtube_oauth.py --account second_channel")
 
 
 if __name__ == "__main__":

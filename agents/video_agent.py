@@ -30,8 +30,8 @@ class VideoRenderParams:
     Per-video subtitle render parameters. Starts at defaults; QA remediation
     (Phase 3) tweaks a COPY for one video without touching global settings.
     """
-    fontsize_pct: float = 0.040    # subtitle font as fraction of video height
-    subtitle_y:   float = 0.80     # vertical position (fraction from top)
+    fontsize_pct: float = 0.050    # subtitle font as fraction of video height (~43px YouTube, ~77px Reels)
+    subtitle_y:   float = 0.77     # vertical position — slightly toward center vs 0.80 (was bottom-heavy)
     max_cue_dur:  float = 10.0     # max seconds a cue stays on screen
 
 
@@ -120,19 +120,41 @@ def _make_clip_from_photo(src: str, w: int, h: int, duration: float,
                            out: str, direction_idx: int = 0) -> bool:
     """Ken Burns effect: slow zoom-pan on a photo → video clip.
 
+    For PORTRAIT output (h > w, e.g. Reels 1080×1920): if the source image is
+    LANDSCAPE (wider than tall), we first center-crop a vertical strip before
+    zoompan — otherwise zoompan would squish/stretch the content to fill the
+    portrait frame.
+
     Upscales to 8000px first (eliminates zoompan jitter per FFmpeg bug #4298).
     """
     n_frames = int(duration * FPS)
     x_expr, y_expr = _PAN_DIRECTIONS[direction_idx % len(_PAN_DIRECTIONS)]
-    # Upscale → zoompan → scale down to target
-    vf = (
-        f"scale=8000:-1,"
-        f"zoompan=z='min(zoom+0.0015,1.4)':"
-        f"x='{x_expr}':y='{y_expr}':"
-        f"d={n_frames}:s={w}x{h}:fps={FPS},"
-        f"setsar=1"
-        f"{_fade_suffix(duration)}"
-    )
+
+    portrait = h > w  # True for Reels (1080×1920), False for YouTube (1920×1080)
+    if portrait:
+        # For landscape → portrait: scale to height, center-crop a vertical strip,
+        # then zoompan on the already-portrait crop. This preserves content proportions.
+        # scale=-1:8000  keeps aspect ratio (wider than 8000 tall)
+        # crop: take the center vertical strip of width = height*(w/h)
+        vf = (
+            f"scale=-1:8000,"
+            f"crop=w='ih*{w}/{h}':h=ih:x='(iw-ih*{w}/{h})/2':y=0,"
+            f"zoompan=z='min(zoom+0.0015,1.4)':"
+            f"x='{x_expr}':y='{y_expr}':"
+            f"d={n_frames}:s={w}x{h}:fps={FPS},"
+            f"setsar=1"
+            f"{_fade_suffix(duration)}"
+        )
+    else:
+        # Landscape → landscape: original path, scale wide and let zoompan crop.
+        vf = (
+            f"scale=8000:-1,"
+            f"zoompan=z='min(zoom+0.0015,1.4)':"
+            f"x='{x_expr}':y='{y_expr}':"
+            f"d={n_frames}:s={w}x{h}:fps={FPS},"
+            f"setsar=1"
+            f"{_fade_suffix(duration)}"
+        )
     cmd = [
         FFMPEG_BIN, "-y",
         "-loop", "1", "-framerate", str(FPS), "-i", src,
@@ -276,8 +298,8 @@ def _burn_subtitles(raw_path: str, audio_path: str,
 
 def _drawtext_filter(srt_path: str, tmp_dir: Path,
                      video_w: int = 1920, video_h: int = 1080,
-                     fontsize_pct: float = 0.040,
-                     subtitle_y: float = 0.80,
+                     fontsize_pct: float = 0.050,
+                     subtitle_y: float = 0.77,
                      max_cue_dur: float = 10.0) -> str:
     """
     Build a drawtext filter chain — one per SRT cue, time-gated with enable='between(t,…)'.

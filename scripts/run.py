@@ -56,11 +56,14 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="Assemble locally, skip YouTube upload")
     parser.add_argument("--reference-url", metavar="URL", default=None,
-                        help="B站/YouTube URL to extract reference frames from "
-                             "(use with --timestamps)")
+                        help="B站/YouTube URL to extract reference footage from")
+    parser.add_argument("--time-range", metavar="START-END", default=None,
+                        help="Continuous time range to scan, e.g. '7:40-8:10'. "
+                             "Downloads the whole segment once, auto-samples frames every 2.5s. "
+                             "Preferred over --timestamps for hands-off extraction.")
     parser.add_argument("--timestamps", metavar="T1,T2,...", default=None,
-                        help="Comma-separated timestamps to extract (e.g. '2:30,5:15,8:40'). "
-                             "Each becomes a reference frame that competes with AI/stock per scene.")
+                        help="Comma-separated specific timestamps (e.g. '7:48,8:01,8:06'). "
+                             "Downloads a 12s window around each point.")
     args = parser.parse_args()
 
     try:
@@ -96,16 +99,30 @@ def main() -> int:
 
         from orchestrator import run_pipeline, run_pipeline_from_folder
 
-        # Extract reference frames from B站/YouTube if requested
+        # Extract reference footage from B站/YouTube if requested
         reference_frames = None
-        if args.reference_url and args.timestamps:
-            from agents.reference_agent import extract_reference_frames
+        if args.reference_url:
             from pathlib import Path
-            ts_list = [t.strip() for t in args.timestamps.split(",") if t.strip()]
-            ref_dir = Path("output") / "references" / args.reference_url.split("/")[-2].strip("/") or "ref"
-            print(f"\n[run.py] Extracting {len(ts_list)} reference frame(s) from {args.reference_url}")
-            reference_frames = extract_reference_frames(args.reference_url, ts_list, ref_dir)
-            print(f"[run.py] {len(reference_frames)} frame(s) ready → these will compete per scene\n")
+            ref_dir = Path("output/references") / (
+                args.reference_url.rstrip("/").split("/")[-1] or "ref"
+            )
+            if args.time_range:
+                # ── Preferred: scan entire range, auto-sample ─────────────────
+                from agents.reference_agent import extract_reference_from_range
+                print(f"\n[run.py] Scanning reference range {args.time_range} from:\n"
+                      f"         {args.reference_url}")
+                reference_frames = extract_reference_from_range(
+                    args.reference_url, args.time_range, ref_dir)
+                print(f"[run.py] {len(reference_frames)} frame+clip pair(s) ready\n")
+            elif args.timestamps:
+                # ── Fallback: specific timestamps ─────────────────────────────
+                from agents.reference_agent import extract_reference_frames
+                ts_list = [t.strip() for t in args.timestamps.split(",") if t.strip()]
+                print(f"\n[run.py] Extracting {len(ts_list)} reference frame(s) from:\n"
+                      f"         {args.reference_url}")
+                reference_frames = extract_reference_frames(
+                    args.reference_url, ts_list, ref_dir)
+                print(f"[run.py] {len(reference_frames)} frame(s) ready\n")
 
         if args.from_folder:
             result = run_pipeline_from_folder(

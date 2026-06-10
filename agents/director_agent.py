@@ -75,11 +75,12 @@ def _llm_chat(system: str, user: str, temperature: float = 0.75,
         temperature=temperature, max_tokens=max_tokens)
     return resp.choices[0].message.content
 
-# Narration length targets (words). Short punchy lines are GOOD for Reels —
-# 4 words ("Twenty dollars a plate") is fine; we only block 1-3 word filler
-# ("Explore the unknown") and overlong lines that wrap to 4-5 subtitle lines.
+# Narration length targets (words).
+# Growth format: short punchy hooks (6-10 words). Info format: full teaching sentences (8-18 words).
+# We only BLOCK 1-3 word filler (too short) and lines over the format's max.
 MIN_NARRATION_WORDS = 4
-MAX_NARRATION_WORDS = 13
+MAX_NARRATION_WORDS_GROWTH = 13
+MAX_NARRATION_WORDS_INFO   = 18
 
 
 class BriefValidationError(Exception):
@@ -285,21 +286,32 @@ def _load_guidelines(video_type: str = "growth") -> str:
 # ── Groq director prompt ──────────────────────────────────────────────────────
 
 _SYSTEM = """\
-You are a creative director for Instagram Reels / YouTube Shorts China travel videos.
+You are DIRECTOR + ART DIRECTOR for Instagram Reels / YouTube Shorts China travel videos.
 Target: {target_seconds}-second videos with {n_scenes} scenes × {secs_per_scene}s each.
-These are SHORT-FORM — every word must earn its place. Think viral Reels, not documentaries.
+
+NARRATION LENGTH — follow the guidelines' format rules exactly:
+  • growth format: 6-10 words — punchy hooks, incomplete-feeling, leaves gaps
+  • info format:   8-18 words — complete teaching sentences; explain WHY not just WHAT
+  BAD (any format): "Explore the unknown" (generic, no China detail)
+  GOOD growth: "Three dollars. That's what breakfast costs here." (7 words, price shock)
+  GOOD info:   "They inflate the skin with air first — so the fat melts away from the surface." (complete explanation with reason)
 
 STRICT scene rules (ALL must pass):
-1. narration: 6-10 spoken words — punchy, incomplete-feeling, makes viewer want the next scene
-   BAD:  "Explore the unknown" (generic, no China detail)
-   BAD:  "This is a very beautiful and incredible place in China" (too long, filler adjectives)
-   GOOD: "This town is 1,200 years old. Almost no one visits." (8+5 words, two punchy facts)
-   GOOD: "Three dollars. That's what breakfast costs here." (7 words, price shock)
-   GOOD: "What if I told you this place exists?" (8 words, curiosity gap)
-2. Scene 0 hook: MUST be a question or tension-starter (6-10 words), e.g. "What is hiding two hours from Shanghai?"
-3. Each scene must make the viewer NEED to see the next one — leave a gap, not a conclusion
+1. narration length — see format rules above; info lines are COMPLETE SENTENCES with WHY
+2. Scene 0 hook: question or tension-starter that the viewer NEEDS answered
+3. Each scene flows into the next — leave a gap or build curiosity, never conclude too early
 4. visual_query: 10-15 words, China location + time of day + light mood + one human/motion detail
-5. Last scene CTA: 5-8 words hinting at unseen content, e.g. "More places like this. Follow us."
+5. Last scene: a closing line that creates LONGING or quiet reflection (info) or comment-bait (growth)
+
+ART DIRECTION — gen_prompt rules (20-35 words, one per scene):
+You know the WHOLE topic. Frame each prompt around ONE focal point:
+  • ACTION line (slicing, pouring, wrapping): EXTREME CLOSE-UP on hands + action. NO face.
+  • TEXTURE/SENSORY line (crispy, glossy, steam): MACRO close-up on that texture, shallow depth, no clutter.
+  • PLACE/DISH line: clean hero shot of THAT subject only, no distracting background.
+  Examples (topic = Beijing roast duck):
+    narration "108 slices by hand" → "Extreme close-up of a knife slicing lacquered Peking roast duck into thin glistening slices on a wood board, crispy skin, hands only, no face, warm light, shallow depth of field"
+    narration "skin shatters like glass" → "Macro close-up of glossy mahogany Peking duck skin, oil sheen glistening, crispy crackled texture, steam rising, shallow depth, no people, no background clutter"
+  NEVER: vague "beautiful food", faces when the point is hands, unrelated background.
 
 Return ONLY valid JSON — no markdown, no explanation:
 {{
@@ -317,6 +329,7 @@ Return ONLY valid JSON — no markdown, no explanation:
       "narration": "...(6-10 words, punchy, leaves viewer wanting more)",
       "visual_query": "...(rich cinematic description, used to judge footage match)",
       "search_query": "...(2-4 PLAIN keywords a stock-video site will match — the SUBJECT/dish/action only, ALWAYS naming the food. For food, describe the COOKED DISH: e.g. 'roasted duck dish food', 'sliced roast duck plate', 'roast duck restaurant'. NEVER bare 'duck' (returns live ducks). NEVER ambiguous words like 'carving'/'carving tradition' (returns STONE carving) — say 'sliced roast duck' instead. NEVER place names like 'Nanluogu Xiang' (stock has none). Always include the food word in EVERY scene's query.)",
+      "gen_prompt": "...(20-35 word tight-shot AI image prompt — follow ART DIRECTION rules above)",
       "duration": {secs_per_scene},
       "emotion": "cinematic|energetic|serene|dramatic|warm"
     }},
@@ -459,6 +472,7 @@ def _generate_brief_via_groq(
     insights: str = "",
     guidelines: str = "",
     prompt: str = "",
+    video_type: str = "growth",
 ) -> CreativeBrief:
     n_scenes     = math.ceil(target_seconds / SLIDE_DURATION)
     secs_per     = round(target_seconds / n_scenes, 1)
@@ -508,7 +522,7 @@ def _generate_brief_via_groq(
         )
 
     raw = _llm_chat(system, "\n\n".join(user_parts),
-                    temperature=0.75, max_tokens=1800).strip()
+                    temperature=0.75, max_tokens=2400).strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -529,6 +543,7 @@ def _generate_brief_via_groq(
             duration=float(s.get("duration", secs_per)),
             emotion=s.get("emotion", "cinematic"),
             search_query=s.get("search_query", ""),
+            gen_prompt=s.get("gen_prompt", ""),   # Art Direction merged into Director
         )
         for i, s in enumerate(raw_scenes)
     ]
@@ -547,18 +562,20 @@ def _generate_brief_via_groq(
         topic_label=data.get("topic_label", ""),
     )
 
-    # Validate word counts — flag both too-short and too-long narrations.
+    # Validate word counts — format-aware limits.
+    # Info format allows fuller teaching sentences; growth needs short punchy hooks.
+    max_words = MAX_NARRATION_WORDS_INFO if video_type == "info" else MAX_NARRATION_WORDS_GROWTH
     bad = []
     for i, s in enumerate(raw_scenes):
         wc = len(s.get("narration", "").split())
         if wc < MIN_NARRATION_WORDS:
             bad.append((i, s.get("narration", ""), f"{wc}w too short"))
-        elif wc > MAX_NARRATION_WORDS:
+        elif wc > max_words:
             bad.append((i, s.get("narration", ""), f"{wc}w too long"))
     if bad:
         examples = "; ".join(f'Scene {i} ({why}): "{n}"' for i, n, why in bad[:3])
         raise BriefValidationError(
-            f"Narrations must be {MIN_NARRATION_WORDS}-{MAX_NARRATION_WORDS} words. "
+            f"Narrations must be {MIN_NARRATION_WORDS}-{max_words} words ({video_type} format). "
             f"Problems: {examples}. Rewrite ALL narrations to this length.",
             brief=brief,   # keep it — a prompt-faithful brief beats a generic template
         )
@@ -625,7 +642,8 @@ def create_brief(
               f"scenes={math.ceil(target_seconds / SLIDE_DURATION)})…")
         try:
             brief = _generate_brief_via_groq(
-                audience_type, target_seconds, feedback, insights, guidelines, prompt
+                audience_type, target_seconds, feedback, insights, guidelines, prompt,
+                video_type=video_type,
             )
             last_attempt = brief
         except BriefValidationError as e:

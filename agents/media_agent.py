@@ -461,11 +461,23 @@ def compete_and_apply(video_id: str, scene_index: int, search_query: str,
             shutil.copy(w["video"], media_dir / f"{scene_index:02d}.mp4")
             print(f"      scene {scene_index}: ✅ AI-generated VIDEO (score {score}/10)")
         elif w["kind"] == "reference":
-            (media_dir / f"{scene_index:02d}.mp4").unlink(missing_ok=True)
-            shutil.copy(w["img"], media_dir / f"{scene_index:02d}.jpg")
-            if used_ref_paths is not None:
-                used_ref_paths.add(w["img"])  # mark used so next scene gets a different frame
-            print(f"      scene {scene_index}: ✅ real reference frame (score {score}/10)")
+            # Prefer the real VIDEO clip alongside the jpg when available —
+            # real video has more authenticity than a static frame, and it
+            # avoids the Ken Burns zoompan entirely (real motion looks better).
+            ref_jpg = Path(w["img"])
+            ref_mp4 = ref_jpg.with_suffix(".mp4")
+            if ref_mp4.exists() and ref_mp4.stat().st_size > 50_000:
+                (media_dir / f"{scene_index:02d}.jpg").unlink(missing_ok=True)
+                shutil.copy(str(ref_mp4), media_dir / f"{scene_index:02d}.mp4")
+                if used_ref_paths is not None:
+                    used_ref_paths.add(w["img"])
+                print(f"      scene {scene_index}: ✅ real reference VIDEO clip (score {score}/10)")
+            else:
+                (media_dir / f"{scene_index:02d}.mp4").unlink(missing_ok=True)
+                shutil.copy(w["img"], media_dir / f"{scene_index:02d}.jpg")
+                if used_ref_paths is not None:
+                    used_ref_paths.add(w["img"])
+                print(f"      scene {scene_index}: ✅ real reference frame (score {score}/10)")
         else:
             (media_dir / f"{scene_index:02d}.mp4").unlink(missing_ok=True)
             shutil.copy(w["img"], media_dir / f"{scene_index:02d}.jpg")
@@ -542,6 +554,110 @@ def download_scene_alternatives(video_id: str, scene_index: int, query: str,
     return out
 
 
+# ── Pre-assembly content check (Optimization D) ────────────────────────────────
+
+def pre_check_and_fix_media(
+    video_id: str,
+    media_items: list["MediaItem"],
+    match_descriptions: list[str],
+    gen_prompts: list[str] | None = None,
+    reference_frames: list[str] | None = None,
+) -> list["MediaItem"]:
+    """
+    Pre-assembly quality gate: score each selected media item against its
+    narration with ONE Qwen-VL call BEFORE the video is assembled.
+
+    Any scene scoring < 6 gets an immediate re-do (with make_video=True so AI
+    video is in the pool), so the video only needs to be assembled ONCE.
+    This avoids the QA → content-mismatch → replace → reassemble loop.
+
+    Returns the (possibly updated) media_items list.
+    """
+    import tempfile
+    from agents.vision import vision_available, analyse_images_json
+    from config.settings import FFMPEG_BIN
+    if not vision_available() or not media_items:
+        return media_items
+
+    media_dir = Path(OUTPUT_DIR) / video_id / "media"
+    tmp = Path(tempfile.mkdtemp(prefix="precheck_"))
+    try:
+        # Extract one representative frame per item for Qwen-VL scoring
+        frames: list[tuple[int, str]] = []          # (scene_idx, frame_path)
+        for i, item in enumerate(media_items):
+            fp = tmp / f"f{i:02d}.jpg"
+            if item.kind == "clip":
+                import subprocess as _sub
+                r = _sub.run([
+                    FFMPEG_BIN, "-y", "-ss", "1", "-i", item.path,
+                    "-frames:v", "1", "-vf", "scale=480:-1", str(fp)
+                ], capture_output=True, timeout=15)
+                if r.returncode == 0 and fp.exists() and fp.stat().st_size > 1000:
+                    frames.append((i, str(fp)))
+            else:
+                import shutil as _sh
+                _sh.copy(item.path, fp)
+                frames.append((i, str(fp)))
+
+        if not frames:
+            return media_items
+
+        paths  = [p for _, p in frames]
+        labels = [
+            f'[Scene {idx} — narration: "{match_descriptions[idx] if idx < len(match_descriptions) else ""}"]'
+            for idx, _ in frames
+        ]
+        prompt = (
+            "Each image is a SELECTED media item for a China travel/food video scene.\n"
+            "For each scene, score how clearly and directly the image SHOWS what the "
+            "narration describes (0-10).\n"
+            "Score < 6 = wrong footage (wrong subject, unrelated, or too generic).\n"
+            "Score ≥ 6 = acceptable (shows the right thing, even if not perfect).\n"
+            "Return ONLY JSON array: "
+            '[{"scene": <idx>, "score": <0-10>, "ok": <true/false>}, ...]'
+        )
+        result = analyse_images_json(paths, prompt, labels)
+        if not isinstance(result, list):
+            return media_items
+
+        bad = [r["scene"] for r in result
+               if isinstance(r, dict) and not r.get("ok", True)
+               and isinstance(r.get("scene"), int)]
+
+        if bad:
+            print(f"  [PreCheck] {len(bad)} scene(s) need better footage: {bad}")
+        else:
+            print(f"  [PreCheck] ✅ all {len(frames)} scene(s) pass pre-check")
+
+        for idx in bad:
+            if idx >= len(media_items):
+                continue
+            gp   = gen_prompts[idx] if gen_prompts and idx < len(gen_prompts) else ""
+            narr = match_descriptions[idx] if idx < len(match_descriptions) else ""
+            kind = compete_and_apply(
+                video_id, idx, narr, narr, gen_prompt=gp,
+                min_score=5, make_video=True, reference_frames=reference_frames,
+            )
+            if kind:
+                clip  = media_dir / f"{idx:02d}.mp4"
+                photo = media_dir / f"{idx:02d}.jpg"
+                if clip.exists() and clip.stat().st_size > 50_000:
+                    media_items[idx] = MediaItem(str(clip), "clip")
+                elif photo.exists():
+                    media_items[idx] = MediaItem(str(photo), "photo")
+                print(f"  [PreCheck] scene {idx}: fixed ({kind})")
+            else:
+                print(f"  [PreCheck] scene {idx}: no better match found — keeping original")
+
+    except Exception as e:
+        print(f"  [PreCheck] skipped ({e})")
+    finally:
+        import shutil as _sh
+        _sh.rmtree(tmp, ignore_errors=True)
+
+    return media_items
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def download_media(video_id: str, queries: list[str],
@@ -597,6 +713,13 @@ def download_media(video_id: str, queries: list[str],
                                  used_ref_paths=used_ref_paths)
         if kind in ("clip", "genvideo"):
             items.append(MediaItem(str(clip_path), "clip"))
+            continue
+        if kind == "reference":
+            # compete_and_apply wrote either .mp4 (real clip) or .jpg (static frame)
+            if clip_path.exists() and clip_path.stat().st_size > 50_000:
+                items.append(MediaItem(str(clip_path), "clip"))
+            elif photo_path.exists():
+                items.append(MediaItem(str(photo_path), "photo"))
             continue
         if kind == "image":
             items.append(MediaItem(str(photo_path), "photo"))

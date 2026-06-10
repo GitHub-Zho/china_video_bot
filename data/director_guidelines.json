@@ -32,15 +32,16 @@
       "note": "Punchy is good, but NEVER cryptic. Each line must be instantly understood and give a real reason to care — not a riddle like 'one duck, 108 slices, all by hand' (which means nothing on its own)."
     },
     "info": {
-      "goal": "Teach a viewer who may know nothing about the topic, building genuine interest in China so they follow to learn more. Authentic, never salesy, no engagement bait.",
-      "length_hint_seconds": 28,
-      "voice": "A knowledgeable friend TEACHING you something genuinely interesting. Calm, warm, clear. Every line must DELIVER A REAL FACT or insight a beginner learns from — origin/history, why a technique exists, what it tastes like, or a comparison to a food they know. The viewer should finish feeling they learned something and want to know more. NEVER cryptic fragments.",
+      "goal": "Teach a viewer who may know nothing about the topic, building genuine curiosity and longing. The viewer should finish feeling 'I want to experience this' — not because you told them to, but because you explained the WHY so clearly they want it themselves.",
+      "length_hint_seconds": 32,
+      "narration_length_note": "Info narrations can be 8-18 words — complete sentences that teach. Growth format uses 6-10 word hooks; info uses fuller, explanatory sentences.",
+      "voice": "A knowledgeable friend who EXPLAINS things — not just what, but WHY. For every fact you state, explain the reason or result behind it ('they inflate the skin... so the fat melts out, leaving it glass-crisp'). The viewer should feel they genuinely UNDERSTAND the subject, not just heard facts about it.",
       "use_interaction_hook": false,
-      "scene_arc": "Aim for: 0) a hook that promises knowledge, 1) historical/cultural origin, 2) the key technique AND why it matters, 3) the taste / a comparison the viewer can relate to, 4) a closing line that invites more curiosity.",
+      "scene_arc": "Follow this 7-beat arc:\n  0) HOOK QUESTION: 'Why does [X] taste so different from everything else?' or 'How do they make [X] so [quality]?' — a question the viewer wants answered.\n  1) CULTURAL ANCHOR: Where it came from, who ate it, when — make it feel special ('imperial palace food, over 700 years ago').\n  2) WHAT MAKES IT SPECIAL: The one or two unique features that set it apart. NOT a dry fact — explain WHY this feature matters ('the skin is everything — glossy, oil-sheen, cracks like glass').\n  3) SUSPENSE: 'But how do they achieve this?' — a bridge into the process.\n  4a) PROCESS STEP 1: First technique, with the WHY ('they inflate the skin first — so the fat melts out of the surface and drains away').\n  4b) PROCESS STEP 2: Second technique ('then slow-roast over fruitwood — the smoke turns the skin deep mahogany and adds a faint sweetness').\n  4c) FINALE: The eating moment or the unique serving ritual ('a master carves it tableside into 108 thin slices — you eat the crispy skin first, dipped in white sugar').\n  5) CLOSING LONGING: A single line that makes the viewer WANT to be there ('crispy, rich, faintly sweet — unlike anything you've had').",
       "hook_patterns": [
-        "Surprising origin: 'Peking duck was perfected in the emperor's kitchens 700 years ago.'",
-        "Why-it's-special: 'The whole dish exists to make one thing perfect — the skin.'",
-        "Relatable comparison: 'Think of the crispiest thing you've eaten. This is crispier.'"
+        "Question hook: 'Why is Peking duck so different from every other roast duck?'",
+        "Curiosity gap: 'The whole dish exists just to perfect one thing — the skin.'",
+        "Surprising premise: 'This is imperial palace food. And you can eat it for twenty dollars.'"
       ],
       "cta_patterns": [
         "China's full of dishes with stories like this.",
@@ -48,12 +49,14 @@
         "There's history in every bite here."
       ],
       "example_good_narrations": [
-        "Peking duck dates back to the imperial kitchens of the 1300s.",
-        "Chefs separate the skin from the meat with air, so it roasts glass-crisp.",
-        "It's slow-roasted over fruitwood until the skin turns deep mahogany.",
-        "You eat the crackling skin first, dipped in sugar — that's the prize.",
-        "Then wrap the meat in a thin pancake with scallion and sweet bean sauce.",
-        "Crispy, rich, faintly sweet — closer to roast goose than any Western roast."
+        "Why does Peking duck taste like nothing else in the world?",
+        "It was imperial palace food — perfected in Beijing's kitchens over 700 years ago.",
+        "The whole dish exists to perfect one thing: the skin — glossy, oil-sheened, and glass-crisp.",
+        "But how do they get the skin so crispy?",
+        "First, they inflate it with air — so the fat melts away from the surface.",
+        "Then slow-roast over fruitwood until the skin turns deep mahogany.",
+        "A master carves it tableside — you eat the crispy skin first, dipped in white sugar.",
+        "Crispy, rich, faintly sweet. Unlike anything you've ever eaten."
       ]
     }
   },
@@ -93,8 +96,8 @@
     "_note": "These are technical rules baked into the code. Listed here so the Director understands the constraints it is working within.",
     "hook_card_duration_s": 2.0,
     "hook_card_rule": "First 2 seconds = freeze frame with large hook text overlay (bold, box background). Must be readable at a glance.",
-    "subtitle_sizing": "Font size = 3.2% of video height. ~34px for YouTube 1080p, ~61px for Instagram Reels 1920px.",
-    "subtitle_position": "Bottom 18% of frame (y=82%). Clears Instagram UI chrome at bottom. Never goes lower.",
+    "subtitle_sizing": "Font size = 5.0% of video height × 0.8 = 4% effective. ~43px for YouTube 1080p, ~77px for Instagram Reels 1920px.",
+    "subtitle_position": "23% from bottom (y=77%). Slightly toward center for better readability. Clears Instagram UI chrome.",
     "subtitle_max_duration_s": 3.5,
     "subtitle_rule": "Each cue shows for max 3.5s. No lingering. Text clears between thoughts.",
     "video_formats": "YouTube 1920x1080 (16:9) AND Reels 1080x1920 (9:16) — both generated from same source",

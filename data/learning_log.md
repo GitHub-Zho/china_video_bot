@@ -242,3 +242,350 @@ None.
 **Status:** ⏳ Monitor — no action taken yet
 
 ---
+
+## [8] 2026-06-06 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 1 issue(s):
+    ❌ [content] t=9.7s — Narration says 'This is the sound of perfection' but the frame shows someone clapping their hands with flour, not related to duck preparation.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [9] 2026-06-08 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 2 issue(s):
+    ❌ [content] t=15.8s — Narration says 'One duck, 108 slices, all carved by hand carefully' but the frame shows a carved stone slab on stairs — no duck or carving in sight. This is a content mismatch.
+    ❌ [content] t=11.3s — Narration says 'Chefs pump air under the skin for a crispy secret' but the frame shows a chef working in a kitchen with no visible duck or air-pumping action. The footage does not match the narration.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [10] 2026-06-08 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 4 issue(s):
+    ❌ [content] t=17.3s — Narration claims 'One duck, 108 slices, all carved by hand in Beijing's tradition' but the frame shows a whole roasted duck on a spit, not sliced or being carved — content mismatch
+    ❌ [content] t=18.8s — Narration refers to slicing technique but frame shows uncut roasted duck rotating on spit — no carving visible, content mismatch
+    ❌ [content] t=20.3s — Narration mentions hand-carved slices but footage shows intact roasted duck — no evidence of slicing, content mismatch
+    ❌ [content] t=21.8s — Narration talks about traditional hand carving but frame shows whole duck on rotisserie — no carving action shown, content mismatch
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [11] 2026-06-08 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 2 issue(s):
+    ❌ [content] t=6.8s — Narration says 'Chefs pump air under the skin for crispness' but the frame shows slicing of cooked duck, not the air-pumping process — content mismatch.
+    ❌ [content] t=9.8s — Narration says 'It hangs over fruitwood fire for hours' but the frame shows a close-up of fire and coals without clearly showing a duck hanging over it — visual evidence of roasting is missing or ambiguous.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [12] 2026-06-08 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 2 issue(s):
+    ❌ [visual] t=17.3s — Black frame with no visible content, likely a transition or technical error, but it's not a proper visual for the narration 'Can you find this place? Drop the name in comments.'
+    ? [visual] t=18.8s — Narration refers to a Beijing roast duck location, but the frame shows a street food stall with what appears to be Vietnamese-style meat (possibly pork) and signage in Vietnamese ('PHI YAN'), indicating a mismatch in location and cuisine.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [13] 2026-06-08 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 2 issue(s):
+    ❌ [content] t=11.3s — Narration says 'Hanging over fruitwood fire for hours slowly' but the frame shows a person handling cooked meat on trays, not ducks hanging over a fire — content mismatch
+    ❌ [content] t=12.8s — Narration continues about hanging over fruitwood fire, but frame shows prepared meat on trays — does not match the described process
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [14] 2026-06-08 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 1 issue(s):
+    ❌ [content] t=14.3s — Narration refers to a specific 'restaurant' but the frame shows a generic meat stall with various roasted meats including duck, chicken, and pork — not clearly identifiable as the specific Peking roast duck restaurant mentioned. The visual does not confirm it's the same location referenced in prior frames.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [15] 2026-06-09 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 1 issue(s):
+    ❌ [content] t=14.3s — Narration says 'Guilin's Li River looks like an ink painting' but the frame shows a man with cormorants on a boat — this is not a clear depiction of the river itself, nor does it visually represent the 'ink painting' aesthetic; the focus is on the person and birds rather than the landscape.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [16] 2026-06-09 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 2 issue(s):
+    ❌ [content] t=8.3s — Narration says 'The skin shatters like glass — that's the test.' but the frame shows a close-up of duck being sliced, not the skin shattering visibly. The action does not clearly demonstrate the 'shattering' quality described in the narration.
+    ❌ [visual] t=14.3s — Frame is significantly darkened or faded, possibly due to a transition effect, making the content hard to see and reducing visual clarity.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [17] 2026-06-10 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 1 issue(s):
+    ❌ [content] t=8.3s — Narration says 'Chefs separate skin from meat with air' but the frame shows a chef slicing cooked duck meat on a cutting board — this does not visually demonstrate the separation of skin and meat using air, which is a specific technique. The footage shows standard slicing, not the air-inflation method.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [18] 2026-06-10 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 3 issue(s):
+    ❌ [content] t=14.3s — Narration says 'Eat the crackling skin first, dipped in sugar.' but the frame shows a street food stall with hanging meat that appears to be pork belly or char siu, not Peking duck skin. The visual does not clearly show Peking duck skin being eaten or dipped in sugar.
+    ❌ [content] t=15.8s — Narration refers to Peking duck skin, but the footage shows what appears to be pork belly or another type of roasted meat at a street stall. No clear evidence of Peking duck skin is visible.
+    ❌ [content] t=17.3s — Narration continues about eating Peking duck skin, but the frame still shows non-specific roasted meat at a market stall — not identifiable as Peking duck skin. Content mismatch.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [19] 2026-06-10 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 1 issue(s):
+    ❌ [content] t=8.3s — Narration says 'Chefs separate skin from meat with air' — this refers to the traditional technique of inflating the duck before roasting to separate skin and meat. However, the frame shows slicing already cooked duck, not the separation process. This is a content mismatch as it does not visually represent the described technique.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [20] 2026-06-10 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 1 issue(s):
+    ❌ [content] t=14.3s — Narration says 'You eat the crackling skin first, dipped in sugar.' but frame shows a black screen — no visual content to support the claim. This is a content mismatch as it fails to show the action described.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [21] 2026-06-10 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 1 issue(s):
+    ❌ [content] t=8.3s — Narration says 'Chefs separate skin from meat with air' — this refers to inflating the duck before roasting, but the frame shows slicing already cooked duck meat, not the separation process. The visual does not match the culinary technique being described.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [22] 2026-06-10 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 2 issue(s):
+    ❌ [content] t=8.3s — Narration says 'Chefs separate the skin from the meat with air' — this refers to inflating the duck before roasting, but the frame shows sliced duck being carved, not the separation process. The visual does not match the culinary technique described.
+    ❌ [content] t=14.3s — Narration says 'You eat the crackling skin first, dipped in sugar' — this is specific to Peking duck tradition, but the frame shows two whole chickens roasting on a spit over an open fire, which is not Peking duck and not consistent with the context of Beijing roast duck preparation or serving.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [23] 2026-06-10 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 1 issue(s):
+    ❌ [content] t=35.3s — Narration refers to Peking duck being carved tableside and eaten with white sugar, but the frame shows two whole chickens roasting on a spit over an open fire — not Peking duck preparation or serving. This is a clear content mismatch.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---

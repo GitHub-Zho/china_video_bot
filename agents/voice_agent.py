@@ -14,7 +14,7 @@ from config.settings import OUTPUT_DIR
 KOKORO_MODEL  = str(Path.home() / ".cache/kokoro/kokoro-v1.0.onnx")
 KOKORO_VOICES = str(Path.home() / ".cache/kokoro/voices-v1.0.bin")
 KOKORO_VOICE  = "af_heart"   # warm American female — best for travel content
-KOKORO_SPEED  = 1.05         # slightly faster = more energetic, less flat
+KOKORO_SPEED  = 1.15         # faster delivery = more energetic, Reels-paced
 
 # edge-tts fallback constants
 EDGE_VOICE = "en-US-AriaNeural"

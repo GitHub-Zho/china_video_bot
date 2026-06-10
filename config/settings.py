@@ -62,11 +62,18 @@ SCENE_TAIL        = 0.6       # silent beat after the line before the next scene
 MIN_SCENE_SECONDS = 3.2       # each scene holds at least this long (short lines still breathe)
 HOOK_TO_FIRST_GAP = 0.7       # extra breath after the hook card before the first word
 
-# === Publishing ===
+# === Publishing — YouTube ===
 PUBLISH_HOUR     = 9          # 9:00 AM daily
 PUBLISH_TZ       = "America/New_York"
 VIDEO_PRIVACY    = "public"   # "public" | "unlisted" | "private"
 YOUTUBE_CATEGORY = "19"       # 19 = Travel & Events
+
+# === Publishing — Instagram ===
+# Credentials set up by: python scripts/setup_instagram.py
+# Token is stored in credentials/instagram_token.json (auto-refreshed)
+IG_USER_ID      = os.getenv("IG_USER_ID", "")
+IG_ACCESS_TOKEN = os.getenv("IG_ACCESS_TOKEN", "")
+IG_SHARE_TO_FEED = True   # also post to Instagram feed (not just Reels tab)
 
 # === Analytics ===
 ANALYTICS_DELAY_DAYS = 3      # wait 3 days after publish before querying

@@ -312,10 +312,11 @@ def _run_one(video_type, audience_type, dry_run, prompt, style, review,
     brief = create_brief(audience_type, prompt=prompt,
                          target_seconds=target_seconds, video_type=video_type)
     print(f"      Topic    : {brief.topic}  |  Audience: {brief.audience_type}")
-
-    # Art director: Qwen reads the whole script → rich per-scene generation prompts
-    from agents.art_director import enrich_gen_prompts
-    enrich_gen_prompts(brief)
+    # gen_prompts are now embedded in the Director output (Optimization A —
+    # Art Director merged into one Qwen call, saving one full round-trip).
+    n_with_prompt = sum(1 for s in brief.scenes if s.gen_prompt)
+    print(f"  [ArtDirector] ✅ {n_with_prompt}/{len(brief.scenes)} gen_prompts "
+          f"embedded in Director output")
 
     out_dir = Path(OUTPUT_DIR) / vid
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -362,6 +363,19 @@ def _build_from_brief(vid: str, brief, dry_run: bool = False,
     photos = sum(1 for m in media_items if m.kind == "photo")
     print(f"      {len(media_items)} items ready ({clips} clips, {photos} photos)")
 
+    # ── 3b. Pre-assembly content check (Optimization D) ──────
+    # Score each selected media item BEFORE assembly — fixes bad footage
+    # in-place so the video is assembled correctly the FIRST time, avoiding
+    # the QA → content-mismatch → replace → reassemble loop.
+    print("\n[3b] Pre-assembly media check…")
+    from agents.media_agent import pre_check_and_fix_media
+    media_items = pre_check_and_fix_media(
+        vid, media_items,
+        match_descriptions=[s.narration for s in brief.scenes],
+        gen_prompts=[s.generation_prompt() for s in brief.scenes],
+        reference_frames=reference_frames,
+    )
+
     # ── 4. Video assembly (scene-timed) ──────────────────────
     print("\n[4/5] Assembling video…")
     video_paths = assemble_video(vid, media_items, audio_path, srt_path,
@@ -386,15 +400,42 @@ def _build_from_brief(vid: str, brief, dry_run: bool = False,
             print(f"   {k}: {v}")
         return video_paths.get("youtube", "")
 
-    # ── 5. Publish ────────────────────────────────────────────
-    print("\n[5/5] Uploading to YouTube…")
-    yt_id = upload_video(video_paths["youtube"], brief.to_metadata_dict())
+    # ── 5. Publish — YouTube + Instagram in parallel ─────────
+    print("\n[5/5] Publishing…")
+    from agents.instagram_agent import upload_reels, instagram_available
+    meta = brief.to_metadata_dict()
+    yt_id = ig_id = None
+
+    # YouTube
+    try:
+        print("  [YouTube] Uploading…")
+        yt_id = upload_video(video_paths["youtube"], meta)
+    except Exception as e:
+        print(f"  [YouTube] ❌ Upload failed: {e}")
+
+    # Instagram Reels
+    reels_path = video_paths.get("reels", "")
+    if reels_path and Path(reels_path).exists() and instagram_available():
+        try:
+            print("  [Instagram] Uploading Reels…")
+            ig_id = upload_reels(reels_path, meta)
+        except Exception as e:
+            print(f"  [Instagram] ❌ Upload failed: {e}")
+    elif not instagram_available():
+        print("  [Instagram] ⚠️  Not configured — run: python scripts/setup_instagram.py")
+
+    # Analytics
     n = run_pending_analytics()
     if n:
         print(f"  [+] Analytics collected for {n} previous video(s)")
         extract_insights()
-    print(f"\n✅ Done!  https://www.youtube.com/watch?v={yt_id}\n")
-    return yt_id
+
+    if yt_id:
+        print(f"\n✅ YouTube:   https://www.youtube.com/watch?v={yt_id}")
+    if ig_id:
+        print(f"✅ Instagram: https://www.instagram.com/p/{ig_id}/")
+    print()
+    return yt_id or ig_id or ""
 
 
 def run_pipeline_from_brief(brief_path: str, dry_run: bool = False,
