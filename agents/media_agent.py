@@ -10,13 +10,17 @@ Returns a list of MediaItem(path, type) so the video agent knows
 whether each asset is a 'clip' or a 'photo' and handles accordingly.
 """
 import os
+import re
+import subprocess
+import tempfile
 import time
 import requests
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from config.settings import (
     PEXELS_API_KEY, UNSPLASH_ACCESS_KEY, PIXABAY_API_KEY,
     IMAGES_PER_VIDEO, IMAGE_DOWNLOAD_DELAY, API_CALL_DELAY, OUTPUT_DIR,
+    FFMPEG_BIN, FFPROBE_BIN, MAX_CLIP_SECONDS,
 )
 
 
@@ -154,7 +158,113 @@ def generate_video_wanx(prompt: str, out_dir: Path) -> str | None:
 @dataclass
 class MediaItem:
     path: str
-    kind: str   # "clip" | "photo"
+    kind: str        # "clip" | "photo"
+    start_sec: float = 0.0   # clip only: best-segment start time chosen by Qwen-VL
+
+
+# ── Smart clip segmentation ───────────────────────────────────────────────────
+
+def pick_clip_segment(clip_path: str, narration: str,
+                      target_dur: float = MAX_CLIP_SECONDS) -> float:
+    """
+    Use Qwen-VL to find the most relevant start time in a stock clip.
+
+    Why: stock clips (Pexels/Pixabay) can be 15-30 s long. The most visually
+    relevant content — the close-up, the key action — often isn't at t=0.
+    Picking blindly from the start means we frequently use generic establishing
+    shots when a much better moment exists 8 s later.
+
+    Strategy:
+      1. ffprobe → clip duration
+      2. Short clip (≤ 1.5 × target)? return 0.0 (no analysis needed)
+      3. Build up to 4 candidate windows evenly spaced across the clip
+      4. Extract one frame per window (at window midpoint)
+      5. Qwen-VL: "which frame best illustrates: <narration>?"
+      6. Return that window's start time; fall back to 0.0 on any failure
+
+    Only called for freshly-downloaded stock clips (not AI-generated video,
+    not reference frames — those are already precisely selected).
+    """
+    # ── 1. Get clip duration ─────────────────────────────────────────────────
+    try:
+        probe = subprocess.run(
+            [FFPROBE_BIN, "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", clip_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        clip_dur = float(probe.stdout.strip())
+    except Exception:
+        return 0.0
+
+    # No need to analyze if the clip is barely longer than what we need
+    if clip_dur <= target_dur * 1.5:
+        return 0.0
+
+    # ── 2. Candidate windows ─────────────────────────────────────────────────
+    max_windows = 4
+    n_windows   = min(max_windows, max(2, int(clip_dur / target_dur)))
+    max_start   = clip_dur - target_dur          # last valid start position
+    starts      = [max_start * i / (n_windows - 1) for i in range(n_windows)]
+
+    # ── 3. Extract one representative frame per window ───────────────────────
+    tmp_dir     = Path(tempfile.mkdtemp(prefix="seg_pick_"))
+    frame_paths: list[str] = []
+    labels:      list[str] = []
+
+    try:
+        for idx, start in enumerate(starts):
+            seek      = start + target_dur * 0.4   # slightly before midpoint
+            out_frame = str(tmp_dir / f"frame_{idx:02d}.jpg")
+            r = subprocess.run(
+                [FFMPEG_BIN, "-y",
+                 "-ss", f"{seek:.2f}", "-i", clip_path,
+                 "-frames:v", "1", "-q:v", "3", out_frame],
+                capture_output=True, timeout=15,
+            )
+            if r.returncode == 0 and Path(out_frame).exists():
+                frame_paths.append(out_frame)
+                labels.append(f"Window {idx + 1} (starts at {start:.1f}s)")
+
+        if len(frame_paths) < 2:
+            return 0.0
+
+        # ── 4. Qwen-VL: which window best illustrates the scene? ─────────────
+        from agents.vision import analyse_images
+        prompt = (
+            f"I need to cut a {target_dur:.0f}-second clip for a scene described as:\n"
+            f'"{narration}"\n\n'
+            f"These {len(frame_paths)} frames are sampled from different time windows "
+            f"of the same stock video clip. Each frame represents roughly where that "
+            f"window's content looks like.\n\n"
+            f"Which window number ({', '.join(str(i+1) for i in range(len(frame_paths)))}) "
+            f"best matches the scene description — i.e. shows the most relevant, "
+            f"visually specific content?\n\n"
+            f"Reply with ONLY the window number. Nothing else."
+        )
+        response = analyse_images(frame_paths, prompt, labels=labels,
+                                  temperature=0.1, max_tokens=8)
+
+        if response:
+            m = re.search(r'\b([1-4])\b', response.strip())
+            if m:
+                chosen_idx = int(m.group(1)) - 1
+                if 0 <= chosen_idx < len(starts):
+                    chosen = starts[chosen_idx]
+                    print(f"    [Segment] window {chosen_idx+1} selected "
+                          f"(start={chosen:.1f}s / clip={clip_dur:.1f}s) — {narration[:50]}")
+                    return chosen
+
+    except Exception as e:
+        print(f"    [Segment] pick_clip_segment error: {e}")
+    finally:
+        for f in frame_paths:
+            Path(f).unlink(missing_ok=True)
+        try:
+            tmp_dir.rmdir()
+        except Exception:
+            pass
+
+    return 0.0
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -711,8 +821,14 @@ def download_media(video_id: str, queries: list[str],
                                  min_score=5, make_video=False, used_ids=used_video_ids,
                                  reference_frames=reference_frames,
                                  used_ref_paths=used_ref_paths)
-        if kind in ("clip", "genvideo"):
-            items.append(MediaItem(str(clip_path), "clip"))
+        if kind == "genvideo":
+            # AI-generated video: short + purpose-built for the scene, no analysis needed
+            items.append(MediaItem(str(clip_path), "clip", start_sec=0.0))
+            continue
+        if kind == "clip":
+            # Stock clip: find the most relevant segment with Qwen-VL
+            start = pick_clip_segment(str(clip_path), judge_q)
+            items.append(MediaItem(str(clip_path), "clip", start_sec=start))
             continue
         if kind == "reference":
             # compete_and_apply wrote either .mp4 (real clip) or .jpg (static frame)
@@ -735,7 +851,9 @@ def download_media(video_id: str, queries: list[str],
                 clip_path.write_bytes(data)
                 used_video_ids.add(fresh[0]["id"])
                 print(f"      clip ✓ ({len(data)//1024}KB)")
-                items.append(MediaItem(str(clip_path), "clip"))
+                # Analyze segment even in fallback — stock clips need it most
+                start = pick_clip_segment(str(clip_path), judge_q)
+                items.append(MediaItem(str(clip_path), "clip", start_sec=start))
                 continue
         photo_url = _search_pexels_photo(china_q) or _search_unsplash_photo(china_q)
         if photo_url:

@@ -96,15 +96,22 @@ _PAN_DIRECTIONS = [
 
 
 def _make_clip_from_video(src: str, w: int, h: int, duration: float,
-                           out: str) -> bool:
-    """Trim + scale-crop a video clip to (w,h), no black bars."""
+                           out: str, start_sec: float = 0.0) -> bool:
+    """
+    Trim + scale-crop a video clip to (w,h), no black bars.
+
+    start_sec: where in the source clip to begin (chosen by pick_clip_segment).
+               0.0 = start from the beginning (default / photos / AI-generated).
+    """
     vf = (
         f"scale={w}:{h}:force_original_aspect_ratio=increase,"
         f"crop={w}:{h},setsar=1"
         f"{_fade_suffix(duration)}"
     )
     cmd = [
-        FFMPEG_BIN, "-y", "-i", src,
+        FFMPEG_BIN, "-y",
+        "-ss", str(start_sec),   # seek to the Qwen-VL-selected start point
+        "-i", src,
         "-t", str(duration),
         "-vf", vf,
         "-r", str(FPS),
@@ -517,7 +524,9 @@ def assemble_video(video_id: str, media_items, audio_path: str,
                 ok  = False
 
                 if item.kind == "clip":
-                    ok = _make_clip_from_video(item.path, w, h, dur, seg)
+                    start = getattr(item, "start_sec", 0.0)
+                    ok = _make_clip_from_video(item.path, w, h, dur, seg,
+                                               start_sec=start)
                     if not ok:
                         print(f"    clip {i} render failed, falling back to photo mode")
 
