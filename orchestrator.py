@@ -558,90 +558,64 @@ def run_pipeline_from_video(
     sample_interval: float = 4.0,
 ) -> str:
     """
-    Mode 2 pipeline — write a script grounded in real video content.
+    Mode 2 pipeline — analyse a reference video, clip it, write grounded narration.
 
-    Unlike Mode 1 (topic → Director freely invents), Mode 2:
-      1. Downloads the reference video (Bilibili / YouTube / any yt-dlp source)
-      2. Samples frames and uses Qwen-VL to understand each step
-      3. Extracts clean reference frames at the key step timestamps for use as media
-      4. Passes the structured VideoUnderstanding to the Director so the script
-         is written from actual observed content, not hallucinated generics
-      5. Runs the standard Voice → Media → Assemble → QA → Publish pipeline
+    Two-pass design:
+      Pass 1 (UNDERSTAND, 4s interval): download → Qwen-VL → VideoUnderstanding
+      Pass 2 (CLIP, 2s interval):       dense timeline → text match scenes →
+                                         extract real mp4 clips from source video
 
-    url:             Bilibili/YouTube URL (anything yt-dlp supports)
-    topic:           e.g. "Beijing Roast Duck preparation" — guides analysis + Director
-    sample_interval: seconds between sampled frames for analysis (default 4s)
-    review:          if True, stop after script generation for human approval
-    dry_run:         if True, build locally and skip upload
+    Clips from the source video are used directly as media. Stock footage fills
+    any scenes the source video can't cover.
 
-    Example:
-      python scripts/run.py --from-video https://www.bilibili.com/video/BV1EY4y1B7Mc/ \\
-                            --topic "Beijing Roast Duck" --dry-run
+    url:    Bilibili/YouTube URL (anything yt-dlp supports)
+    topic:  e.g. "Beijing Roast Duck preparation"
+    review: stop after script generation for human approval
+
+    Usage:
+      python scripts/run.py --from-video https://www.bilibili.com/video/BV... \\
+                            --topic "Beijing Roast Duck" --dry-run --review
     """
-    from agents.video_analyst_agent import analyze_video
-    from agents.reference_agent     import extract_reference_frames
+    from agents.video_analyst_agent import (
+        analyze_video, extract_clips_for_brief,
+    )
+    from agents.voice_agent import generate_voice_scenes
 
     vid = _video_id() + "_mode2"
-    print(f"\n{'='*58}")
+    print(f"\n{'='*60}")
     print(f"  China Video Bot  ·  Mode 2 (Video-Grounded)  ·  {vid}")
-    print(f"  URL: {url}")
+    print(f"  URL  : {url}")
     if topic:
         print(f"  Topic: {topic}")
-    print(f"{'='*58}")
+    print(f"{'='*60}")
 
     out_dir = Path(OUTPUT_DIR) / vid
+    media_dir = out_dir / "media"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── 1. Analyse the reference video ───────────────────────────────────────
-    print("\n[1/5] Analysing reference video…")
+    # ── Pass 1: understand the video ─────────────────────────────────────────
+    print("\n[1/6] Pass 1 — Understanding reference video…")
     vu = analyze_video(url, topic=topic or "China food / culture",
                        sample_interval=sample_interval)
 
     if not vu.steps:
-        print("  ⚠️  Video analysis returned no steps. "
-              "Falling back to Mode 1 (topic-only).")
+        print("  ⚠️  Analysis returned no steps → falling back to Mode 1.")
         return run_pipeline(prompt=topic, dry_run=dry_run, review=review,
                             target_seconds=target_seconds)
 
-    # ── 2. Extract clean reference frames at key step timestamps ─────────────
-    # Build timestamp pairs from the understood steps (±1s window per step)
-    print("\n[1b] Extracting reference frames from key moments…")
-    reference_frames: list[str] = []
-    if vu.video_path and Path(vu.video_path).exists():
-        try:
-            # Build a timestamp range string like "0:03-0:10,0:34-0:40,…"
-            step_ranges = []
-            for step in vu.steps:
-                t0 = max(0.0, step.start_sec)
-                t1 = t0 + 6.0   # 6-second window per step
-                m0, s0 = int(t0) // 60, int(t0) % 60
-                m1, s1 = int(t1) // 60, int(t1) % 60
-                step_ranges.append(f"{m0}:{s0:02d}-{m1}:{s1:02d}")
-            timestamps = ",".join(step_ranges[:8])  # cap at 8 ranges
-
-            # extract_reference_frames returns list of frame paths (watermark-stripped)
-            reference_frames = extract_reference_frames(url, timestamps)
-            print(f"  [Ref] {len(reference_frames)} clean reference frames ready")
-        except Exception as e:
-            print(f"  [Ref] ⚠️  Reference frame extraction failed: {e}")
-
-    # ── 3. Director: write grounded script ───────────────────────────────────
-    print("\n[2/5] Director writing grounded script…")
+    # ── Director: write grounded script ──────────────────────────────────────
+    print("\n[2/6] Director writing grounded script…")
     brief = create_brief(
         prompt=topic,
         target_seconds=target_seconds,
         video_understanding=vu,
-        video_type="info",   # step-by-step content reads best as "info"
+        video_type="info",
     )
     print(f"      Topic    : {brief.topic}  |  Audience: {brief.audience_type}")
 
-    (out_dir / "brief.json").write_text(
-        json.dumps(brief.to_metadata_dict(), indent=2)
-    )
-    (out_dir / "metadata.json").write_text(
-        json.dumps(brief.to_metadata_dict(), indent=2)
-    )
-    # Save video understanding alongside the brief for reference
+    # Persist outputs
+    (out_dir / "brief.json").write_text(json.dumps(brief.to_metadata_dict(), indent=2))
+    (out_dir / "metadata.json").write_text(json.dumps(brief.to_metadata_dict(), indent=2))
     (out_dir / "video_understanding.json").write_text(
         json.dumps({
             "url": vu.url, "topic": vu.topic, "summary": vu.summary,
@@ -652,12 +626,85 @@ def run_pipeline_from_video(
 
     if review:
         _print_script(brief)
-        print(f"\n  📋 Mode 2 script saved → output/{vid}/brief.json")
-        print(f"     Video understanding → output/{vid}/video_understanding.json")
-        print(f"     Build it with: python scripts/run.py --from-brief "
+        print(f"\n  📋 Script  → output/{vid}/brief.json")
+        print(f"     Analysis → output/{vid}/video_understanding.json")
+        print(f"  Build: python scripts/run.py --from-brief "
               f"output/{vid}/brief.json{' --dry-run' if dry_run else ''}")
         return str(out_dir / "brief.json")
 
-    # ── 4–5. Standard build pipeline with reference frames ───────────────────
-    return _build_from_brief(vid, brief, dry_run=dry_run,
-                             reference_frames=reference_frames or None)
+    # ── Voice: generate TTS (need durations before clip extraction) ──────────
+    print("\n[3/6] Generating voiceover + subtitles…")
+    narrations = [s.narration for s in brief.scenes]
+    audio_path, srt_path, scene_durations = generate_voice_scenes(vid, narrations)
+    audio_dur = _probe_duration(audio_path)
+    print(f"      Audio: {audio_dur:.1f}s  |  {len(brief.scenes)} scenes")
+
+    # ── Pass 2: dense timeline + clip extraction ──────────────────────────────
+    print("\n[4/6] Pass 2 — Building dense timeline and extracting clips…")
+    source_clips = extract_clips_for_brief(
+        video_understanding=vu,
+        narrations=narrations,
+        scene_durations=scene_durations,
+        out_dir=media_dir,
+    )
+
+    # Fill None entries with stock footage
+    from agents.media_agent import download_media, MediaItem
+    print("\n[4b/6] Filling unmatched scenes with stock footage…")
+    unmatched_indices = [i for i, c in enumerate(source_clips) if c is None]
+    stock_queries = [brief.scenes[i].search_query or brief.scenes[i].visual_query
+                     for i in unmatched_indices]
+    stock_narrations = [narrations[i] for i in unmatched_indices]
+    stock_gp = [brief.scenes[i].gen_prompt for i in unmatched_indices]
+
+    if unmatched_indices:
+        print(f"      {len(unmatched_indices)} scene(s) need stock: "
+              f"{[brief.scenes[i].narration[:30] for i in unmatched_indices]}")
+        stock_items = download_media(vid, stock_queries,
+                                     match_descriptions=stock_narrations,
+                                     gen_prompts=stock_gp)
+        for k, orig_idx in enumerate(unmatched_indices):
+            if k < len(stock_items):
+                source_clips[orig_idx] = stock_items[k]
+    else:
+        print("      All scenes matched to source video ✓")
+
+    # Final media list (filter out any remaining None)
+    media_items = [c for c in source_clips if c is not None]
+    if len(media_items) < 2:
+        print("  ⚠️  Not enough media — falling back to full stock download")
+        media_items = download_media(vid, [s.search_query for s in brief.scenes],
+                                     match_descriptions=narrations,
+                                     gen_prompts=[s.gen_prompt for s in brief.scenes])
+
+    clips  = sum(1 for m in media_items if m.kind == "clip")
+    photos = sum(1 for m in media_items if m.kind == "photo")
+    print(f"\n  Media: {len(media_items)} items ({clips} source clips, {photos} photos/stock)")
+
+    # ── Assemble, QA, Publish ────────────────────────────────────────────────
+    print("\n[5/6] Assembling video…")
+    from agents.video_agent import assemble_video
+    video_paths = assemble_video(vid, media_items, audio_path, srt_path,
+                                 hook_text=brief.hook,
+                                 scene_durations=scene_durations,
+                                 corner_label=brief.label())
+
+    print("\n  [QC] Running post-generation checks…")
+    yt_path = video_paths.get("youtube", "")
+    if yt_path:
+        _quality_check(yt_path, audio_path, hook_seconds=HOOK_CARD_SECONDS)
+        _save_render_state(vid, brief, scene_durations)
+        _qa_and_remediate(vid, video_paths, brief=brief,
+                          scene_durations=scene_durations)
+
+    if dry_run:
+        print(f"\n✅ DRY RUN — videos saved:")
+        for k, v in video_paths.items():
+            print(f"   {k}: {v}")
+        return video_paths.get("youtube", "")
+
+    print("\n[6/6] Publishing…")
+    metadata = brief.to_metadata_dict()
+    yt_id = upload_video(video_paths["youtube"], metadata)
+    print(f"\n✅ Done!  https://www.youtube.com/watch?v={yt_id}\n")
+    return yt_id
