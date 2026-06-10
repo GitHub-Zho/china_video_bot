@@ -95,14 +95,26 @@ def extract_reference_frames(url: str,
             clip_path.unlink(missing_ok=True)
             continue
 
-        # Extract the frame exactly at the centre of the downloaded clip
+        # Extract the frame and blank out the B站/YouTube watermark in the top-left
+        # corner (channel name + platform logo). drawbox fills that region black,
+        # keeping the original resolution — no aspect-ratio change.
+        # Top strip: full width, top 9% of height. Side strip: left 28%, top 12%.
+        # This covers 黑麒麟点评 bilibili / YouTube watermarks without cropping content.
         ex = subprocess.run(
             [
                 FFMPEG_BIN, "-y",
                 "-ss", str(offset_in_clip),
                 "-i", str(clip_path),
                 "-frames:v", "1",
-                "-vf", "scale=960:-1",
+                "-vf", (
+                    "scale=960:-1,"
+                    # top strip — covers B站/YouTube channel logo + platform watermark
+                    "drawbox=x=0:y=0:w=iw:h=ih*0.10:color=black:t=fill,"
+                    # top-left block — wider coverage for long channel names
+                    "drawbox=x=0:y=0:w=iw*0.30:h=ih*0.13:color=black:t=fill,"
+                    # bottom strip — covers burned-in subtitles from the source video
+                    "drawbox=x=0:y=ih*0.82:w=iw:h=ih*0.18:color=black:t=fill"
+                ),
                 str(frame_path),
             ],
             capture_output=True, timeout=30,

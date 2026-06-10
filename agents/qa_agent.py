@@ -109,19 +109,31 @@ def _strategic_timestamps(duration: float, hook_seconds: float = 2.0) -> list[fl
 
 # ── Gemini Vision analysis ────────────────────────────────────────────────────
 
-_QA_PROMPT = """\
-You are a video QA reviewer for short-form China travel videos (Instagram Reels / YouTube Shorts).
+_QA_PROMPT_TEMPLATE = """\
+You are a video QA reviewer for short-form China travel/food videos (Instagram Reels / YouTube Shorts).
+
+VIDEO TOPIC: {topic}
+
+Use the topic as context when evaluating content. For example:
+- If the topic is "Beijing roast duck (Peking duck)", then:
+  • "skin shining" or "crispy skin" → the frame should show glistening duck skin (not generic meat)
+  • "dipped in sugar" → the Peking duck tradition of eating the skin dipped in white sugar (白糖)
+  • "separate skin from meat with air" → inflating the duck before roasting (the frame may show whole duck + gloved hands)
+  • "wrap in pancake" → a thin 薄饼 (mǒbǐng) with scallion, cucumber, and hoisin sauce
+- Apply the same principle for other topics: understand the cultural/culinary context.
 
 Each frame is labelled with its timestamp AND the narration line being spoken over it.
 Identify quality issues, INCLUDING content mismatches.
 
 Check for:
-1. CONTENT MISMATCH (most important): does the footage CLEARLY show the SPECIFIC subject
-   the narration names? Be STRICT. If the narration says "Beijing roast duck" but the frame
-   shows generic roast meat / char siu / a plate you can't confidently identify as roast DUCK,
-   that IS a mismatch — the viewer must be able to tell it's the specific subject. Narration
-   "city wall" but frame shows a temple → mismatch. Stone carving for "duck carving" → mismatch.
-   Flag anything not CLEARLY the named subject as category "content", severity "error".
+1. CONTENT MISMATCH (most important): does the footage CLEARLY show what the narration means
+   IN THE CONTEXT OF THIS VIDEO'S TOPIC? Be contextually strict, not literally strict.
+   A frame showing a whole roast duck with gloved hands IS correct for "chefs separate skin from meat".
+   A frame of Peking duck slices on a plate IS correct for "eat the crackling skin first".
+   A frame of street BBQ skewers, random noodles, or unrelated food IS a mismatch for any duck narration.
+   NOTE: some frames may come from a real reference video and have Chinese subtitles or a small
+   watermark in a corner — this is normal and NOT a quality issue; judge only the main visual content.
+   Flag anything clearly off-topic as category "content", severity "error".
 2. SUBTITLE issues: not visible, too small/large, positioned too low/high (cut off by UI),
    lingering, text overflowing the frame, leaked filter code
 3. HOOK CARD issues: hook text not readable, clipped at edges, or a black/freeze frame right after it
@@ -129,15 +141,16 @@ Check for:
 
 Return ONLY a JSON array (empty if no issues):
 [
-  {"timestamp_s": 19.6, "severity": "error", "category": "content",
-   "description": "Narration says roast duck but frame shows a platter of nuts/cheese — wrong footage"}
+  {{"timestamp_s": 19.6, "severity": "error", "category": "content",
+   "description": "Narration says roast duck skin but frame shows BBQ skewers — wrong footage"}}
 ]
 
 If everything looks fine, return: []"""
 
 
 def _analyse_frames(frames: list[tuple[float, Path]],
-                    scene_windows: list | None = None) -> tuple[list[QAIssue], bool]:
+                    scene_windows: list | None = None,
+                    topic: str | None = None) -> tuple[list[QAIssue], bool]:
     """
     Send sampled frames to the verifier (Gemini).
     scene_windows: optional [(start_s, end_s, narration), ...] in video time, so
@@ -168,7 +181,10 @@ def _analyse_frames(frames: list[tuple[float, Path]],
             labels.append(f'[Frame t={t:.1f}s — narration: "{narr}"]')
         else:
             labels.append(f"[Frame t={t:.1f}s]")
-    data   = analyse_images_json(paths, _QA_PROMPT, labels)
+    qa_prompt = _QA_PROMPT_TEMPLATE.format(
+        topic=topic or "China travel / food (topic not specified)"
+    )
+    data   = analyse_images_json(paths, qa_prompt, labels)
 
     if data is None:
         print("  [QA] Vision analysis unavailable (API error) — NOT a clean pass")
@@ -262,6 +278,7 @@ def qa_check(
     hook_seconds: float = 2.0,
     use_vision: bool = True,
     scene_windows: list | None = None,
+    topic: str | None = None,
 ) -> QAReport:
     """
     Run QA on a finished video. Returns a QAReport.
@@ -301,7 +318,7 @@ def qa_check(
 
     vision_ran = False
     if use_vision:
-        issues, vision_ran = _analyse_frames(frames, scene_windows)
+        issues, vision_ran = _analyse_frames(frames, scene_windows, topic=topic)
         for issue in issues:
             report.add(issue)
 

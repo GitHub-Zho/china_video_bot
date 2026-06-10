@@ -472,11 +472,13 @@ def compete_and_apply(video_id: str, scene_index: int, search_query: str,
 
 
 def find_replacement_clip(video_id: str, scene_index: int, search_query: str,
-                          narration: str, gen_prompt: str = "", min_score: int = 6) -> bool:
-    """QA-escalation: compete stock + AI image + AI VIDEO, apply best ≥ min_score."""
+                          narration: str, gen_prompt: str = "", min_score: int = 6,
+                          reference_frames: list | None = None) -> bool:
+    """QA-escalation: compete stock + AI image + AI VIDEO + reference frames, apply best ≥ min_score."""
     return compete_and_apply(video_id, scene_index, search_query, narration,
                              gen_prompt=gen_prompt, min_score=min_score,
-                             make_video=True) is not None
+                             make_video=True,
+                             reference_frames=reference_frames) is not None
 
 
 # ── Scene alternatives (human-in-the-loop mismatch fix) ───────────────────────

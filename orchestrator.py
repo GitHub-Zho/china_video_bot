@@ -134,7 +134,8 @@ def _reassemble_from_media(vid: str, brief, scene_durations: list[float]) -> Non
 
 
 def _qa_and_remediate(vid: str, video_paths: dict, brief=None,
-                      scene_durations: list[float] | None = None) -> None:
+                      scene_durations: list[float] | None = None,
+                      reference_frames: list | None = None) -> None:
     """
     Phase 3 — QA the video (incl. content-mismatch detection). On fixable subtitle
     issues, auto-adjust params and re-burn. On CONTENT mismatches (footage ≠
@@ -145,10 +146,11 @@ def _qa_and_remediate(vid: str, video_paths: dict, brief=None,
     if not yt_path:
         return
 
+    topic = brief.topic if brief else None
     scene_windows = (_scene_windows(brief, scene_durations)
                      if (brief and scene_durations) else None)
     report = qa_check(yt_path, hook_seconds=HOOK_CARD_SECONDS,
-                      scene_windows=scene_windows)
+                      scene_windows=scene_windows, topic=topic)
 
     # ── Content mismatches → Qwen AUTO-replaces the bad clips ─────────────────
     mism = [i for i in report.issues if i.category == "content"]
@@ -165,9 +167,12 @@ def _qa_and_remediate(vid: str, video_paths: dict, brief=None,
                 continue
             done_scenes.add(idx)
             print(f"        • scene {idx}: {issue.description[:70]}")
+            # reference_frames passed through so QA replacement can still use
+            # the real footage instead of falling back to unrelated stock clips
             ok = find_replacement_clip(vid, idx, brief.scenes[idx].stock_query(),
                                        brief.scenes[idx].narration,
-                                       gen_prompt=brief.scenes[idx].generation_prompt())
+                                       gen_prompt=brief.scenes[idx].generation_prompt(),
+                                       reference_frames=reference_frames)
             (replaced if ok else unfixable).append(idx)
 
         if replaced:
@@ -372,7 +377,8 @@ def _build_from_brief(vid: str, brief, dry_run: bool = False,
         _quality_check(yt_path, audio_path, hook_seconds=HOOK_CARD_SECONDS)
         _save_render_state(vid, brief, scene_durations)
         _qa_and_remediate(vid, video_paths, brief=brief,
-                          scene_durations=scene_durations)
+                          scene_durations=scene_durations,
+                          reference_frames=reference_frames)
 
     if dry_run:
         print(f"\n✅ DRY RUN — videos saved locally (not uploaded):")
