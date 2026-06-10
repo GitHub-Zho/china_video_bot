@@ -555,15 +555,18 @@ def run_pipeline_from_video(
     dry_run: bool = False,
     review: bool = False,
     target_seconds: float | None = None,
-    sample_interval: float = 4.0,
+    sample_interval: float = 2.0,
 ) -> str:
     """
     Mode 2 pipeline — analyse a reference video, clip it, write grounded narration.
 
-    Two-pass design:
-      Pass 1 (UNDERSTAND, 4s interval): download → Qwen-VL → VideoUnderstanding
-      Pass 2 (CLIP, 2s interval):       dense timeline → text match scenes →
-                                         extract real mp4 clips from source video
+    Single-pass design:
+      [1] analyze_video() — download → ONE dense Qwen-VL pass (2s interval) →
+          VideoUnderstanding with key steps (for Director) + full timeline (for clips)
+      [2] Director writes grounded script from the real step list
+      [3] TTS → exact scene_durations
+      [4] extract_clips_for_brief() — text-match narrations to cached timeline →
+          ffmpeg extracts real mp4 clips; unmatched scenes fall back to stock
 
     Clips from the source video are used directly as media. Stock footage fills
     any scenes the source video can't cover.
@@ -593,8 +596,8 @@ def run_pipeline_from_video(
     media_dir = out_dir / "media"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Pass 1: understand the video ─────────────────────────────────────────
-    print("\n[1/6] Pass 1 — Understanding reference video…")
+    # ── [1/5] Analyse: single dense pass (steps + timeline in one shot) ───────
+    print("\n[1/5] Analysing reference video (single pass)…")
     vu = analyze_video(url, topic=topic or "China food / culture",
                        sample_interval=sample_interval)
 
@@ -603,8 +606,8 @@ def run_pipeline_from_video(
         return run_pipeline(prompt=topic, dry_run=dry_run, review=review,
                             target_seconds=target_seconds)
 
-    # ── Director: write grounded script ──────────────────────────────────────
-    print("\n[2/6] Director writing grounded script…")
+    # ── [2/5] Director: write grounded script ────────────────────────────────
+    print("\n[2/5] Director writing grounded script…")
     brief = create_brief(
         prompt=topic,
         target_seconds=target_seconds,
@@ -619,8 +622,10 @@ def run_pipeline_from_video(
     (out_dir / "video_understanding.json").write_text(
         json.dumps({
             "url": vu.url, "topic": vu.topic, "summary": vu.summary,
+            "total_duration": vu.total_duration,
             "steps": [{"timestamp": s.timestamp, "action": s.action,
                        "detail": s.detail} for s in vu.steps],
+            "timeline_entries": len(vu.timeline),
         }, indent=2, ensure_ascii=False)
     )
 
@@ -632,15 +637,15 @@ def run_pipeline_from_video(
               f"output/{vid}/brief.json{' --dry-run' if dry_run else ''}")
         return str(out_dir / "brief.json")
 
-    # ── Voice: generate TTS (need durations before clip extraction) ──────────
-    print("\n[3/6] Generating voiceover + subtitles…")
+    # ── [3/5] Voice: TTS (needed before clip extraction for scene_durations) ──
+    print("\n[3/5] Generating voiceover + subtitles…")
     narrations = [s.narration for s in brief.scenes]
     audio_path, srt_path, scene_durations = generate_voice_scenes(vid, narrations)
     audio_dur = _probe_duration(audio_path)
     print(f"      Audio: {audio_dur:.1f}s  |  {len(brief.scenes)} scenes")
 
-    # ── Pass 2: dense timeline + clip extraction ──────────────────────────────
-    print("\n[4/6] Pass 2 — Building dense timeline and extracting clips…")
+    # ── [4/5] Clip extraction: text-match narrations → cached timeline ────────
+    print("\n[4/5] Matching narrations to source video and extracting clips…")
     source_clips = extract_clips_for_brief(
         video_understanding=vu,
         narrations=narrations,
@@ -681,8 +686,8 @@ def run_pipeline_from_video(
     photos = sum(1 for m in media_items if m.kind == "photo")
     print(f"\n  Media: {len(media_items)} items ({clips} source clips, {photos} photos/stock)")
 
-    # ── Assemble, QA, Publish ────────────────────────────────────────────────
-    print("\n[5/6] Assembling video…")
+    # ── [5/5] Assemble, QA, Publish ─────────────────────────────────────────
+    print("\n[5/5] Assembling video…")
     from agents.video_agent import assemble_video
     video_paths = assemble_video(vid, media_items, audio_path, srt_path,
                                  hook_text=brief.hook,
@@ -703,7 +708,7 @@ def run_pipeline_from_video(
             print(f"   {k}: {v}")
         return video_paths.get("youtube", "")
 
-    print("\n[6/6] Publishing…")
+    print("\nPublishing…")
     metadata = brief.to_metadata_dict()
     yt_id = upload_video(video_paths["youtube"], metadata)
     print(f"\n✅ Done!  https://www.youtube.com/watch?v={yt_id}\n")

@@ -1,24 +1,32 @@
 """
 Video Analyst Agent — Mode 2: understand a reference video, then clip it.
 
-Two-pass design:
-  Pass 1 — UNDERSTAND (fast, sparse, 4s interval)
-    Builds VideoUnderstanding (summary + ordered steps) so the Director
-    can write a grounded script BEFORE media is touched.
-
-  Pass 2 — CLIP (dense, 2s interval, runs after brief is created)
-    Builds a full text timeline of what's happening every 2s.
-    Text-matches each narration scene to the best video timestamp.
-    Extracts real video clips (mp4) from the source — no static frames.
+Single-pass design:
+  ONE analysis pass (dense, 2s interval by default)
+    · Extracts frames once, sends to Qwen-VL with rich "step" prompts
+    · Builds VideoUnderstanding (summary + key steps) for the Director
+    · Stores the full frame timeline so extract_clips_for_brief() can
+      match narrations to timestamps WITHOUT a second video read
 
 Documentary pipeline (Mode 2):
-  analyze_video()  →  VideoUnderstanding  →  Director  →  brief
-  extract_clips_for_brief()  →  list[MediaItem]  →  assemble
+  analyze_video()  →  VideoUnderstanding (steps + full timeline)
+       ↓
+  Director  →  brief  →  TTS  →  scene_durations
+       ↓
+  extract_clips_for_brief()  →  list[MediaItem]  (uses cached timeline)
+       ↓
+  assemble_video()
 
-Why this beats Mode 1:
-  A 10-min source video can be "edited" into a 30s Reel that shows exactly
+Why this beats the old two-pass approach:
+  · Frame extraction: 1× (was 2×)
+  · Qwen-VL calls: ~60 for a 10-min video (was ~90)
+  · Same data serves both Director (understanding) and clip matching (timeline)
+  · Cache covers both uses — re-runs are instant either way
+
+Why Mode 2 beats Mode 1 for how-to content:
+  A 10-min source video is "edited" into a 30s Reel that shows exactly
   the moment the maltose syrup is brushed on, exactly the oven close-up, etc.
-  The narration is grounded in the real content; the clips are the real footage.
+  The narration is grounded in real content; the clips are real footage.
 """
 import json
 import subprocess
@@ -28,12 +36,13 @@ from pathlib import Path
 
 from config.settings import FFMPEG_BIN, FFPROBE_BIN
 
-# Pass 1 — understanding (sparse, fast)
-UNDERSTAND_INTERVAL = 4.0
-# Pass 2 — timeline / clipping (dense, thorough)
-TIMELINE_INTERVAL   = 2.0
-# Frames per Qwen-VL call
+# Single sample interval — used for both understanding and clip matching
+SAMPLE_INTERVAL = 2.0
 BATCH_SIZE = 5
+
+# Legacy alias so old code referencing UNDERSTAND_INTERVAL / TIMELINE_INTERVAL still imports
+UNDERSTAND_INTERVAL = SAMPLE_INTERVAL
+TIMELINE_INTERVAL   = SAMPLE_INTERVAL
 
 
 # ── Data structures ───────────────────────────────────────────────────────────
@@ -49,21 +58,23 @@ class VideoStep:
 
 @dataclass
 class TimelineFrame:
-    """One frame in the dense analysis timeline."""
+    """One entry in the dense analysis timeline."""
     sec:         float
-    description: str   # what is happening at this moment
+    description: str   # "{action}. {detail[:80]}" — concrete enough for clip matching
 
 
 @dataclass
 class VideoUnderstanding:
-    """Structured knowledge extracted from a reference video."""
+    """Structured knowledge extracted from a reference video (single-pass)."""
     url:            str
     topic:          str
     summary:        str
-    steps:          list[VideoStep]
+    steps:          list[VideoStep]        # ≤8 key steps for the Director prompt
     total_duration: float = 0.0
     video_path:     str   = ""
     timeline:       list[TimelineFrame] = field(default_factory=list)
+    # ↑ full dense timeline — every frame's description, used for clip matching
+    #   populated by analyze_video(); extract_clips_for_brief() uses it directly
 
     def to_director_prompt(self) -> str:
         lines = [
@@ -147,34 +158,24 @@ def _extract_frames(video_path: str, interval: float,
 
 # ── Qwen-VL batch analysis ────────────────────────────────────────────────────
 
-def _analyse_batch(frames: list[tuple[float, str]], topic: str,
-                   mode: str = "step") -> list[dict]:
+def _analyse_batch(frames: list[tuple[float, str]], topic: str) -> list[dict]:
     """
-    mode="step"     → {action, detail}      (Pass 1 — understanding)
-    mode="timeline" → {description}          (Pass 2 — dense timeline)
+    Analyse a batch of frames with Qwen-VL.
+    Returns [{start_sec, action, detail}, ...] — one entry per frame.
+    Rich "step" descriptions serve both Director understanding and clip matching.
     """
     from agents.vision import analyse_images
     image_paths = [f for _, f in frames]
     labels      = [f"t={_seconds_to_ts(ts)}" for ts, _ in frames]
 
-    if mode == "step":
-        prompt = (
-            f'Video topic: "{topic}"\n\n'
-            "For EACH frame, describe:\n"
-            "1. action: what step/action is happening (5-8 words)\n"
-            "2. detail: what + why in 1-2 sentences\n\n"
-            'Reply as JSON array — one object per frame, same order:\n'
-            '[{"action":"...","detail":"..."}, ...]\nNo extra text.'
-        )
-    else:  # timeline
-        prompt = (
-            f'Video topic: "{topic}"\n\n'
-            "For EACH frame, write ONE short sentence (8-15 words) describing "
-            "exactly what is visible — the specific action, object, or scene. "
-            "Be concrete, not generic.\n\n"
-            'Reply as JSON array — one string per frame:\n'
-            '["description at t=X", "description at t=Y", ...]\nNo extra text.'
-        )
+    prompt = (
+        f'Video topic: "{topic}"\n\n'
+        "For EACH frame, describe:\n"
+        "1. action: what step/action is happening (5-8 words)\n"
+        "2. detail: what + why in 1-2 sentences\n\n"
+        'Reply as JSON array — one object per frame, same order:\n'
+        '[{"action":"...","detail":"..."}, ...]\nNo extra text.'
+    )
 
     try:
         raw = analyse_images(image_paths, prompt, labels=labels,
@@ -189,48 +190,48 @@ def _analyse_batch(frames: list[tuple[float, str]], topic: str,
         data = json.loads(raw.strip())
 
         results = []
-        if mode == "step" and isinstance(data, list):
+        if isinstance(data, list):
             for i, item in enumerate(data):
                 if i < len(frames):
-                    results.append({"start_sec": frames[i][0],
-                                    "action": item.get("action", ""),
-                                    "detail": item.get("detail", "")})
-        elif mode == "timeline" and isinstance(data, list):
-            for i, desc in enumerate(data):
-                if i < len(frames):
-                    results.append({"start_sec": frames[i][0],
-                                    "description": str(desc)})
+                    results.append({
+                        "start_sec": frames[i][0],
+                        "action": item.get("action", ""),
+                        "detail": item.get("detail", ""),
+                    })
         return results
     except Exception as e:
-        print(f"  [VideoAnalyst] batch error ({mode}): {e}")
+        print(f"  [VideoAnalyst] batch error: {e}")
     return []
 
 
-# ── Pass 1: understanding ─────────────────────────────────────────────────────
+# ── Synthesise key steps for Director ────────────────────────────────────────
 
 def _synthesise_steps(all_steps: list[dict], topic: str,
                       total_dur: float) -> tuple[str, list[VideoStep]]:
-    """Collapse duplicates, keep ≤8 representative steps, generate summary."""
-    # Collapse consecutive same-action frames
+    """
+    Collapse duplicate/consecutive frames, keep ≤8 representative key steps,
+    and generate a 2-3 sentence summary for the Director prompt.
+    """
+    # Collapse consecutive frames with the same action prefix
     collapsed: list[dict] = []
     for step in all_steps:
         if (collapsed and
-                step.get("action","")[:15].lower() == collapsed[-1].get("action","")[:15].lower()):
-            if len(step.get("detail","")) > len(collapsed[-1].get("detail","")):
+                step.get("action", "")[:15].lower() == collapsed[-1].get("action", "")[:15].lower()):
+            if len(step.get("detail", "")) > len(collapsed[-1].get("detail", "")):
                 collapsed[-1]["detail"] = step["detail"]
         else:
             collapsed.append(dict(step))
 
-    # Sub-sample to ≤8
+    # Sub-sample to ≤8 evenly spaced key steps
     if len(collapsed) > 8:
         n = len(collapsed)
-        collapsed = [collapsed[round(i*(n-1)/7)] for i in range(8)]
+        collapsed = [collapsed[round(i * (n - 1) / 7)] for i in range(8)]
 
     steps = [
         VideoStep(timestamp=_seconds_to_ts(s["start_sec"]),
                   start_sec=s["start_sec"],
-                  action=s.get("action",""),
-                  detail=s.get("detail",""))
+                  action=s.get("action", ""),
+                  detail=s.get("detail", ""))
         for s in collapsed if s.get("action")
     ]
 
@@ -257,59 +258,6 @@ def _synthesise_steps(all_steps: list[dict], topic: str,
     return summary, steps
 
 
-# ── Pass 2: dense timeline ────────────────────────────────────────────────────
-
-def build_video_timeline(video_path: str, topic: str,
-                         interval: float = TIMELINE_INTERVAL,
-                         cache_dir: Path | None = None) -> list[TimelineFrame]:
-    """
-    Extract one frame every `interval` seconds and build a dense text timeline.
-    Returns [{sec, description}, ...] covering the entire video.
-
-    Cached per (video_path, interval) so re-runs don't re-process.
-    """
-    import hashlib
-    vid_key   = hashlib.md5(video_path.encode()).hexdigest()[:8]
-    frame_dir = (cache_dir or Path("output/ref_cache")) / f"tl_{vid_key}_{interval:.0f}s"
-    cache_file = frame_dir.parent / f"tl_{vid_key}_{interval:.0f}s.json"
-
-    if cache_file.exists():
-        print(f"  [VideoAnalyst] Timeline cache hit → {cache_file.name}")
-        data = json.loads(cache_file.read_text())
-        return [TimelineFrame(**d) for d in data]
-
-    dur = _get_duration(video_path)
-    print(f"  [VideoAnalyst] Building dense timeline "
-          f"({dur:.0f}s video, 1 frame/{interval:.0f}s)…")
-
-    frames = _extract_frames(video_path, interval, frame_dir)
-    n_frames = len(frames)
-    if not frames:
-        return []
-
-    batches  = [frames[i:i+BATCH_SIZE] for i in range(0, n_frames, BATCH_SIZE)]
-    timeline = []
-    print(f"  [VideoAnalyst] {n_frames} frames → {len(batches)} Qwen-VL calls…")
-
-    for b_idx, batch in enumerate(batches):
-        t0 = _seconds_to_ts(batch[0][0])
-        t1 = _seconds_to_ts(batch[-1][0])
-        print(f"    [{b_idx+1}/{len(batches)}] t={t0}–{t1}", end="\r")
-        results = _analyse_batch(batch, topic, mode="timeline")
-        for r in results:
-            timeline.append(TimelineFrame(sec=r["start_sec"],
-                                          description=r.get("description","")))
-    print()
-
-    # Cache to disk
-    cache_file.write_text(
-        json.dumps([{"sec": f.sec, "description": f.description}
-                    for f in timeline], ensure_ascii=False, indent=2)
-    )
-    print(f"  [VideoAnalyst] Timeline saved → {cache_file.name}")
-    return timeline
-
-
 # ── Scene-to-segment matching ─────────────────────────────────────────────────
 
 def match_scenes_to_segments(
@@ -320,15 +268,14 @@ def match_scenes_to_segments(
 ) -> list[float | None]:
     """
     Use Qwen text to match each narration scene to the best start time
-    in the dense timeline.
+    in the timeline. Text-only (fast, no extra image calls).
 
-    Returns a list of start_sec (float) per scene, or None if no good match.
-    Matching is text-only (fast, no extra image calls).
+    Returns list of start_sec per scene (None = no good match → stock fallback).
     """
     from agents.director_agent import _llm_chat
 
-    # Build a compact timeline string (every 2 entries to stay under token limit)
-    step = max(1, len(timeline) // 60)   # cap at ~60 entries in the prompt
+    # Build compact timeline string (cap at ~60 entries to stay under token limit)
+    step = max(1, len(timeline) // 60)
     tl_lines = [
         f"[{_seconds_to_ts(f.sec)}={f.sec:.0f}s] {f.description}"
         for f in timeline[::step]
@@ -341,7 +288,7 @@ def match_scenes_to_segments(
 
     prompt = (
         f"You are a documentary video editor.\n\n"
-        f"VIDEO TIMELINE (every ~{step*TIMELINE_INTERVAL:.0f}s):\n"
+        f"VIDEO TIMELINE (every ~{step * SAMPLE_INTERVAL:.0f}s):\n"
         f"{timeline_text}\n\n"
         f"NARRATION SCENES to match:\n"
         f"{scenes_text}\n\n"
@@ -349,8 +296,7 @@ def match_scenes_to_segments(
         f"BEST ILLUSTRATES what the narration is describing. "
         f"The clip will be {clip_duration:.0f}s long starting from that point.\n\n"
         f"Rules:\n"
-        f"- Each scene should get a DIFFERENT start time if possible (no two scenes "
-        f"  pointing to the exact same moment)\n"
+        f"- Each scene should get a DIFFERENT start time if possible\n"
         f"- If a scene's narration matches nothing specific, set start_sec to null\n\n"
         f"Reply ONLY as JSON:\n"
         f'{{"matches":[{{"scene":0,"start_sec":4}},{{"scene":1,"start_sec":62}},...]}}'
@@ -377,7 +323,6 @@ def match_scenes_to_segments(
                 sec = m.get("start_sec")
                 if idx is not None and 0 <= idx < len(narrations):
                     if sec is not None:
-                        # Clamp so clip doesn't exceed video end
                         max_start = max(0.0, video_duration - clip_duration)
                         result[idx] = min(float(sec), max_start)
             print(f"  [VideoAnalyst] Scene matches:")
@@ -400,9 +345,8 @@ def extract_scene_clips(
 ) -> list:   # list[MediaItem | None]
     """
     Extract one video clip per scene from the source video.
-    Returns a list where None = no match (caller should use stock fallback).
-
-    Clips are written to out_dir/{i:02d}.mp4.
+    Returns list where None = no match (caller uses stock fallback).
+    Clips written to out_dir/{i:02d}.mp4.
     """
     from agents.media_agent import MediaItem
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -416,7 +360,6 @@ def extract_scene_clips(
             results.append(None)
             continue
 
-        # Pad the clip slightly longer than the scene duration (QA may need it)
         extract_dur = max(dur + 1.0, 3.0)
 
         r = subprocess.run(
@@ -438,29 +381,42 @@ def extract_scene_clips(
     return results
 
 
-# ── Public API: Pass 1 ────────────────────────────────────────────────────────
+# ── Public API: analyze_video (single pass) ───────────────────────────────────
 
 def analyze_video(url: str, topic: str,
-                  sample_interval: float = UNDERSTAND_INTERVAL,
+                  sample_interval: float = SAMPLE_INTERVAL,
                   cache_dir: str = "output/ref_cache") -> VideoUnderstanding:
     """
-    Pass 1 — download and understand a reference video.
+    Download and fully analyse a reference video in ONE dense pass.
 
-    Returns VideoUnderstanding ready for director_agent.create_brief().
-    The understanding uses a sparse frame sample (every 4s by default) to keep
-    this pass fast — it's just for the Director to write a grounded script.
+    · Extracts one frame every sample_interval seconds (default 2s)
+    · Qwen-VL reads every frame with rich "step" prompts (action + detail)
+    · Produces VideoUnderstanding with:
+        .steps    — ≤8 condensed key steps for the Director prompt
+        .timeline — full dense list of TimelineFrame for clip matching
+    · The timeline is cached to JSON so extract_clips_for_brief() is instant
+      on re-runs (no second download or frame extraction needed)
+
+    Args:
+        url:             Bilibili/YouTube URL (anything yt-dlp supports)
+        topic:           e.g. "Beijing Roast Duck preparation"
+        sample_interval: seconds between sampled frames (default 2.0)
+        cache_dir:       directory for video download + frame cache
+
+    Returns: VideoUnderstanding ready for director_agent.create_brief()
     """
     from agents.vision import vision_available
+    import hashlib
 
     cache = Path(cache_dir)
     cache.mkdir(parents=True, exist_ok=True)
 
-    import hashlib
     url_key   = hashlib.md5(url.encode()).hexdigest()[:10]
     vid_path  = str(cache / f"analyst_{url_key}.mp4")
-    frame_dir = cache / f"analyst_{url_key}_frames"
+    frame_dir = cache / f"analyst_{url_key}_frames_{sample_interval:.0f}s"
+    cache_file = cache / f"analyst_{url_key}_timeline_{sample_interval:.0f}s.json"
 
-    # Download
+    # ── Download ──────────────────────────────────────────────────────────────
     if not Path(vid_path).exists():
         print(f"  [VideoAnalyst] Downloading: {url}")
         ok = _download_video(url, vid_path)
@@ -469,91 +425,120 @@ def analyze_video(url: str, topic: str,
             return VideoUnderstanding(url=url, topic=topic,
                                       summary=f"Download failed: {topic}",
                                       steps=[])
-        print(f"  [VideoAnalyst] ✅ Downloaded ({Path(vid_path).stat().st_size//1024//1024}MB)")
+        print(f"  [VideoAnalyst] ✅ Downloaded "
+              f"({Path(vid_path).stat().st_size // 1024 // 1024}MB)")
     else:
         print(f"  [VideoAnalyst] Cache hit → {Path(vid_path).name}")
 
     total_dur = _get_duration(vid_path)
-    print(f"  [VideoAnalyst] Duration: {total_dur:.0f}s ({total_dur/60:.1f} min)")
+    print(f"  [VideoAnalyst] Duration: {total_dur:.0f}s ({total_dur / 60:.1f} min)")
 
-    # Extract understanding frames
-    if not frame_dir.exists() or not any(frame_dir.glob("f_*.jpg")):
-        frames = _extract_frames(vid_path, sample_interval, frame_dir)
-        print(f"  [VideoAnalyst] {len(frames)} frames @ {sample_interval}s intervals")
-    else:
-        frames = sorted(
-            [(round((int(f.stem.split("_")[1]) - 1) * sample_interval, 1), str(f))
-             for f in sorted(frame_dir.glob("f_*.jpg"))],
-        )
-        print(f"  [VideoAnalyst] {len(frames)} frames from cache")
-
-    if not frames:
-        return VideoUnderstanding(url=url, topic=topic,
-                                  summary="No frames extracted.",
-                                  steps=[], total_duration=total_dur,
-                                  video_path=vid_path)
-
-    if not vision_available():
-        print("  [VideoAnalyst] ⚠️  Vision unavailable — stub understanding")
-        return VideoUnderstanding(url=url, topic=topic,
-                                  summary=f"Vision unavailable; video at {vid_path}",
-                                  steps=[], total_duration=total_dur,
-                                  video_path=vid_path)
-
-    # Analyse in batches
+    # ── Load or build timeline from cache ─────────────────────────────────────
     all_steps: list[dict] = []
-    batches = [frames[i:i+BATCH_SIZE] for i in range(0, len(frames), BATCH_SIZE)]
-    print(f"  [VideoAnalyst] Analysing {len(frames)} frames in {len(batches)} batches…")
-    for b_idx, batch in enumerate(batches):
-        print(f"    batch {b_idx+1}/{len(batches)}: "
-              f"{_seconds_to_ts(batch[0][0])}–{_seconds_to_ts(batch[-1][0])}")
-        all_steps.extend(_analyse_batch(batch, topic, mode="step"))
 
-    summary, steps = _synthesise_steps(all_steps, topic, total_dur)
+    if cache_file.exists():
+        print(f"  [VideoAnalyst] Timeline cache hit → {cache_file.name}")
+        cached = json.loads(cache_file.read_text())
+        all_steps = cached  # [{start_sec, action, detail}, ...]
+    else:
+        if not vision_available():
+            print("  [VideoAnalyst] ⚠️  Vision unavailable — stub understanding")
+            return VideoUnderstanding(url=url, topic=topic,
+                                      summary=f"Vision unavailable; video at {vid_path}",
+                                      steps=[], total_duration=total_dur,
+                                      video_path=vid_path)
 
-    print(f"  [VideoAnalyst] ✅ {len(steps)} key steps understood:")
-    for s in steps:
+        # Extract frames (reuse if already on disk from a previous partial run)
+        if not frame_dir.exists() or not any(frame_dir.glob("f_*.jpg")):
+            frames = _extract_frames(vid_path, sample_interval, frame_dir)
+            print(f"  [VideoAnalyst] {len(frames)} frames @ {sample_interval}s intervals")
+        else:
+            frames = sorted(
+                [(round((int(f.stem.split("_")[1]) - 1) * sample_interval, 1), str(f))
+                 for f in sorted(frame_dir.glob("f_*.jpg"))],
+            )
+            print(f"  [VideoAnalyst] {len(frames)} frames from frame cache")
+
+        if not frames:
+            return VideoUnderstanding(url=url, topic=topic,
+                                      summary="No frames extracted.",
+                                      steps=[], total_duration=total_dur,
+                                      video_path=vid_path)
+
+        # Analyse all frames (single pass, "step" mode — rich descriptions)
+        batches = [frames[i:i + BATCH_SIZE] for i in range(0, len(frames), BATCH_SIZE)]
+        print(f"  [VideoAnalyst] Analysing {len(frames)} frames in "
+              f"{len(batches)} Qwen-VL batches…")
+
+        for b_idx, batch in enumerate(batches):
+            t0 = _seconds_to_ts(batch[0][0])
+            t1 = _seconds_to_ts(batch[-1][0])
+            print(f"    [{b_idx + 1}/{len(batches)}] t={t0}–{t1}", end="\r")
+            all_steps.extend(_analyse_batch(batch, topic))
+        print()
+
+        # Cache raw step data to disk
+        cache_file.write_text(
+            json.dumps(all_steps, ensure_ascii=False, indent=2)
+        )
+        print(f"  [VideoAnalyst] ✅ Timeline cached → {cache_file.name}")
+
+    # ── Build full dense timeline (for clip matching) ──────────────────────────
+    full_timeline = [
+        TimelineFrame(
+            sec=s["start_sec"],
+            description=f"{s.get('action', '')}. {s.get('detail', '')[:80]}".strip(". ")
+        )
+        for s in all_steps if s.get("action")
+    ]
+
+    # ── Condense to ≤8 key steps (for Director prompt) ────────────────────────
+    summary, key_steps = _synthesise_steps(all_steps, topic, total_dur)
+
+    print(f"  [VideoAnalyst] ✅ {len(key_steps)} key steps  |  "
+          f"{len(full_timeline)} timeline entries")
+    for s in key_steps:
         print(f"    [{s.timestamp}] {s.action}")
 
-    return VideoUnderstanding(url=url, topic=topic, summary=summary, steps=steps,
-                              total_duration=total_dur, video_path=vid_path)
+    return VideoUnderstanding(
+        url=url, topic=topic, summary=summary, steps=key_steps,
+        total_duration=total_dur, video_path=vid_path,
+        timeline=full_timeline,
+    )
 
 
-# ── Public API: Pass 2 ────────────────────────────────────────────────────────
+# ── Public API: extract_clips_for_brief ──────────────────────────────────────
 
 def extract_clips_for_brief(
     video_understanding: VideoUnderstanding,
     narrations: list[str],
     scene_durations: list[float],
     out_dir: Path,
-    timeline_interval: float = TIMELINE_INTERVAL,
+    timeline_interval: float = SAMPLE_INTERVAL,  # kept for API compatibility; unused
 ) -> list:   # list[MediaItem | None]
     """
-    Pass 2 — build a dense timeline and extract one video clip per scene.
+    Match narrations to the pre-built timeline and extract real mp4 clips.
 
-    Runs AFTER the Director has written the brief (needs narrations + durations).
-    Returns a list of MediaItem (clip) or None per scene.
-    None entries signal "use stock fallback" for that scene.
+    This is the clip-extraction half of Mode 2. It runs AFTER TTS (needs
+    scene_durations). The video_understanding.timeline was populated by
+    analyze_video() — no second video read or frame extraction needed.
 
-    The dense timeline (every 2s) is cached so re-runs are instant.
+    Returns list of MediaItem (clip) or None per scene.
+    None entries → use stock footage fallback for that scene.
     """
     video_path = video_understanding.video_path
     if not video_path or not Path(video_path).exists():
         print("  [VideoAnalyst] No video path — skipping clip extraction")
         return [None] * len(narrations)
 
-    total_dur = video_understanding.total_duration or _get_duration(video_path)
-
-    # Build (or load cached) dense timeline
-    cache_dir = Path(video_path).parent
-    timeline  = build_video_timeline(video_path, video_understanding.topic,
-                                     interval=timeline_interval,
-                                     cache_dir=cache_dir)
+    timeline = video_understanding.timeline
     if not timeline:
         print("  [VideoAnalyst] Empty timeline — stock fallback for all scenes")
         return [None] * len(narrations)
 
-    # Match each narration to a timestamp
+    total_dur = video_understanding.total_duration or _get_duration(video_path)
+
+    # Match narrations to timestamps (text-only Qwen call, fast)
     avg_dur = sum(scene_durations) / max(len(scene_durations), 1)
     start_times = match_scenes_to_segments(
         timeline, narrations,
@@ -568,3 +553,60 @@ def extract_clips_for_brief(
     matched = sum(1 for c in clips if c is not None)
     print(f"  [VideoAnalyst] ✅ {matched}/{len(narrations)} scenes matched to source video")
     return clips
+
+
+# ── Legacy: build_video_timeline (kept for import compatibility) ──────────────
+
+def build_video_timeline(video_path: str, topic: str,
+                         interval: float = SAMPLE_INTERVAL,
+                         cache_dir: Path | None = None) -> list[TimelineFrame]:
+    """
+    Deprecated: previously a separate Pass 2 function.
+    Now a thin wrapper — rebuilds a timeline from cached step data if present,
+    or falls back to re-extracting frames.
+
+    Prefer analyze_video() which populates VideoUnderstanding.timeline.
+    """
+    import hashlib
+    vid_key    = hashlib.md5(video_path.encode()).hexdigest()[:8]
+    cache_root = cache_dir or Path("output/ref_cache")
+    cache_file = cache_root / f"tl_{vid_key}_{interval:.0f}s.json"
+
+    if cache_file.exists():
+        print(f"  [VideoAnalyst] Legacy timeline cache hit → {cache_file.name}")
+        data = json.loads(cache_file.read_text())
+        # Support both old format (sec+description) and new (start_sec+action+detail)
+        result = []
+        for d in data:
+            if "description" in d:
+                result.append(TimelineFrame(**d))
+            else:
+                result.append(TimelineFrame(
+                    sec=d["start_sec"],
+                    description=f"{d.get('action', '')}. {d.get('detail', '')[:80]}".strip(". ")
+                ))
+        return result
+
+    # Full re-extraction (shouldn't be needed in normal flow)
+    dur = _get_duration(video_path)
+    print(f"  [VideoAnalyst] Legacy build_video_timeline "
+          f"({dur:.0f}s, 1 frame/{interval:.0f}s)…")
+    frame_dir = (cache_root / f"tl_{vid_key}_{interval:.0f}s")
+    frames    = _extract_frames(video_path, interval, frame_dir)
+    if not frames:
+        return []
+
+    batches  = [frames[i:i + BATCH_SIZE] for i in range(0, len(frames), BATCH_SIZE)]
+    timeline = []
+    for batch in batches:
+        for r in _analyse_batch(batch, "video content"):
+            timeline.append(TimelineFrame(
+                sec=r["start_sec"],
+                description=f"{r.get('action', '')}. {r.get('detail', '')[:80]}".strip(". ")
+            ))
+
+    cache_file.write_text(
+        json.dumps([{"sec": f.sec, "description": f.description}
+                    for f in timeline], ensure_ascii=False, indent=2)
+    )
+    return timeline
