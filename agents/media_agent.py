@@ -358,16 +358,20 @@ def _pick_best_candidate(candidates: list[dict], query: str) -> dict | None:
 
 def compete_and_apply(video_id: str, scene_index: int, search_query: str,
                       narration: str, gen_prompt: str = "", min_score: int = 5,
-                      make_video: bool = False, used_ids: set | None = None) -> str | None:
+                      make_video: bool = False, used_ids: set | None = None,
+                      reference_frames: list | None = None) -> str | None:
     """
     Core selection: build a pool of STOCK candidates + AI-GENERATED footage (image,
-    and optionally a video), then let Qwen score them ALL against the narration and
-    apply the single best to the scene's media slot.
+    and optionally a video) + optional REFERENCE frames extracted from a real video
+    (e.g. B站), then let Qwen score them ALL against the narration and apply the best.
 
-    gen_prompt: the rich, full-context prompt from the Art Director (preferred for
-                AI generation — a bare keyword gives the model no context).
+    reference_frames: list of jpg paths extracted by reference_agent. ALL of them
+        join the pool for EVERY scene; Qwen will naturally pick the one that best
+        matches each scene's narration (e.g. the slicing frame scores high for the
+        carving scene, low for the history scene).
+    gen_prompt: the rich, full-context prompt from the Art Director.
     make_video: also generate an AI video candidate (slower; used on QA escalation).
-    Returns "clip" | "genvideo" | "image" if applied, else None.
+    Returns "clip" | "genvideo" | "image" | "reference" if applied, else None.
     """
     import tempfile, shutil, subprocess
     from agents.vision import vision_available, analyse_images_json
@@ -406,17 +410,30 @@ def compete_and_apply(video_id: str, scene_index: int, search_query: str,
         for g in generate_images_wanx(gp, 1, work):
             pool.append({"kind": "image", "preview": g, "img": g})
 
+        # Reference frames from a real video (B站/YouTube) — all frames enter
+        # every scene's pool; Qwen will pick the one that matches each narration best.
+        for rf in (reference_frames or []):
+            rf_path = Path(rf)
+            if rf_path.exists():
+                pool.append({"kind": "reference", "preview": str(rf_path), "img": str(rf_path)})
+
         if not pool:
             return None
 
+        def _kind_label(k):
+            return {"clip": "stock video", "genvideo": "AI video",
+                    "image": "AI-generated image", "reference": "real reference frame"}.get(k, k)
+
         paths  = [c["preview"] for c in pool]
-        labels = [f"[Candidate {i} — {'AI-generated' if pool[i]['kind']!='clip' else 'stock'}]"
+        labels = [f"[Candidate {i} — {_kind_label(pool[i]['kind'])}]"
                   for i in range(len(pool))]
         prompt = (
             f"Each image is a candidate visual for this narration line:\n\"{narration}\"\n"
             f"(subject: {search_query})\n\n"
             f"Pick the candidate that BEST and most clearly shows what the narration "
-            f"describes, and rate it 0-10. Prefer clearly-on-topic over generic.\n"
+            f"describes, and rate it 0-10. Prefer clearly-on-topic over generic. "
+            f"'real reference frame' candidates are from an authentic video and should "
+            f"be preferred when they clearly match.\n"
             f'Return ONLY JSON: {{"best": <number>, "score": <0-10>, "why": "<short>"}}'
         )
         result = analyse_images_json(paths, prompt, labels)
@@ -441,6 +458,10 @@ def compete_and_apply(video_id: str, scene_index: int, search_query: str,
             (media_dir / f"{scene_index:02d}.jpg").unlink(missing_ok=True)
             shutil.copy(w["video"], media_dir / f"{scene_index:02d}.mp4")
             print(f"      scene {scene_index}: ✅ AI-generated VIDEO (score {score}/10)")
+        elif w["kind"] == "reference":
+            (media_dir / f"{scene_index:02d}.mp4").unlink(missing_ok=True)
+            shutil.copy(w["img"], media_dir / f"{scene_index:02d}.jpg")
+            print(f"      scene {scene_index}: ✅ real reference frame (score {score}/10)")
         else:
             (media_dir / f"{scene_index:02d}.mp4").unlink(missing_ok=True)
             shutil.copy(w["img"], media_dir / f"{scene_index:02d}.jpg")
@@ -517,7 +538,8 @@ def download_scene_alternatives(video_id: str, scene_index: int, query: str,
 
 def download_media(video_id: str, queries: list[str],
                    match_descriptions: list[str] | None = None,
-                   gen_prompts: list[str] | None = None) -> list[MediaItem]:
+                   gen_prompts: list[str] | None = None,
+                   reference_frames: list[str] | None = None) -> list[MediaItem]:
     """
     Download one media item per scene.
 
@@ -561,7 +583,8 @@ def download_media(video_id: str, queries: list[str],
         # Uses the rich Art-Director gen_prompt so AI generation has full context.
         gp = gen_prompts[i] if gen_prompts and i < len(gen_prompts) else ""
         kind = compete_and_apply(video_id, i, query, judge_q, gen_prompt=gp,
-                                 min_score=5, make_video=False, used_ids=used_video_ids)
+                                 min_score=5, make_video=False, used_ids=used_video_ids,
+                                 reference_frames=reference_frames)
         if kind in ("clip", "genvideo"):
             items.append(MediaItem(str(clip_path), "clip"))
             continue

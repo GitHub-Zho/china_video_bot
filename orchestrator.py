@@ -268,14 +268,17 @@ def _resolve_style(style: str):
 
 def run_pipeline(audience_type: str = None, dry_run: bool = False,
                  prompt: str = "", style: str = "", review: bool = False,
-                 target_seconds: float = None, video_type: str = "both"):
+                 target_seconds: float = None, video_type: str = "both",
+                 reference_frames: list | None = None):
     """
     Full pipeline for one video (or both formats).
     video_type     → "growth" (hook/engagement), "info" (educational story), or
                      "both" (default — make one of each for the same topic).
     review=True    → generate the script(s) ONLY and stop for approval.
     dry_run=True   → assemble locally, skip YouTube upload.
-    prompt/style/target_seconds → as before.
+    reference_frames → optional list of jpg paths extracted from a real B站/YouTube
+                       video by reference_agent. They join the scoring pool for every
+                       scene; Qwen picks the best one per scene.
 
     Returns a single path/id (one type) or a {type: path/id} dict ("both").
     """
@@ -284,14 +287,14 @@ def run_pipeline(audience_type: str = None, dry_run: bool = False,
         for vt in ("growth", "info"):
             print(f"\n############  {vt.upper()} version  ############")
             results[vt] = _run_one(vt, audience_type, dry_run, prompt, style,
-                                   review, target_seconds)
+                                   review, target_seconds, reference_frames=reference_frames)
         return results
     return _run_one(video_type, audience_type, dry_run, prompt, style,
-                    review, target_seconds)
+                    review, target_seconds, reference_frames=reference_frames)
 
 
 def _run_one(video_type, audience_type, dry_run, prompt, style, review,
-             target_seconds) -> str:
+             target_seconds, reference_frames=None) -> str:
     vid = _video_id() + f"_{video_type}"
     print(f"\n{'='*55}")
     print(f"  China Video Bot  ·  {vid}")
@@ -322,11 +325,13 @@ def _run_one(video_type, audience_type, dry_run, prompt, style, review,
               f"output/{vid}/brief.json{' --dry-run' if dry_run else ''}")
         return str(out_dir / "brief.json")
 
-    return _build_from_brief(vid, brief, dry_run=dry_run, render_params=render_params)
+    return _build_from_brief(vid, brief, dry_run=dry_run, render_params=render_params,
+                             reference_frames=reference_frames)
 
 
 def _build_from_brief(vid: str, brief, dry_run: bool = False,
-                      render_params=None) -> str:
+                      render_params=None,
+                      reference_frames: list | None = None) -> str:
     """Shared build path: Voice → Media → Assemble → QA → Publish."""
     out_dir = Path(OUTPUT_DIR) / vid
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -344,7 +349,8 @@ def _build_from_brief(vid: str, brief, dry_run: bool = False,
     match_descs    = [s.narration for s in brief.scenes]           # judge against the narration
     gen_prompts    = [s.generation_prompt() for s in brief.scenes] # rich prompts for AI gen
     media_items = download_media(vid, search_queries,
-                                 match_descriptions=match_descs, gen_prompts=gen_prompts)
+                                 match_descriptions=match_descs, gen_prompts=gen_prompts,
+                                 reference_frames=reference_frames)
     if len(media_items) < 2:
         raise RuntimeError(f"Only {len(media_items)} media item(s) — check API keys.")
     clips  = sum(1 for m in media_items if m.kind == "clip")

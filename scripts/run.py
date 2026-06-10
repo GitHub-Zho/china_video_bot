@@ -55,6 +55,12 @@ def main() -> int:
     parser.add_argument("--pick", type=int, default=None, help="Alternative index to use (with --fix)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Assemble locally, skip YouTube upload")
+    parser.add_argument("--reference-url", metavar="URL", default=None,
+                        help="B站/YouTube URL to extract reference frames from "
+                             "(use with --timestamps)")
+    parser.add_argument("--timestamps", metavar="T1,T2,...", default=None,
+                        help="Comma-separated timestamps to extract (e.g. '2:30,5:15,8:40'). "
+                             "Each becomes a reference frame that competes with AI/stock per scene.")
     args = parser.parse_args()
 
     try:
@@ -90,6 +96,17 @@ def main() -> int:
 
         from orchestrator import run_pipeline, run_pipeline_from_folder
 
+        # Extract reference frames from B站/YouTube if requested
+        reference_frames = None
+        if args.reference_url and args.timestamps:
+            from agents.reference_agent import extract_reference_frames
+            from pathlib import Path
+            ts_list = [t.strip() for t in args.timestamps.split(",") if t.strip()]
+            ref_dir = Path("output") / "references" / args.reference_url.split("/")[-2].strip("/") or "ref"
+            print(f"\n[run.py] Extracting {len(ts_list)} reference frame(s) from {args.reference_url}")
+            reference_frames = extract_reference_frames(args.reference_url, ts_list, ref_dir)
+            print(f"[run.py] {len(reference_frames)} frame(s) ready → these will compete per scene\n")
+
         if args.from_folder:
             result = run_pipeline_from_folder(
                 args.from_folder, dry_run=args.dry_run,
@@ -99,7 +116,8 @@ def main() -> int:
             result = run_pipeline(
                 audience_type=args.audience, dry_run=args.dry_run,
                 prompt=args.prompt, style=args.style, review=args.review,
-                target_seconds=args.seconds, video_type=args.video_type
+                target_seconds=args.seconds, video_type=args.video_type,
+                reference_frames=reference_frames,
             )
 
         if isinstance(result, dict):
