@@ -102,21 +102,45 @@ class VideoUnderstanding:
 # ── Download + ffprobe ────────────────────────────────────────────────────────
 
 def _download_video(url: str, out_path: str) -> bool:
-    try:
-        r = subprocess.run(
-            ["yt-dlp",
-             "--format",
-             "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]"
-             "/bestvideo[height<=480]+bestaudio/best[height<=480]/best",
-             "--merge-output-format", "mp4",
-             "--no-playlist", "--quiet", "--no-warnings",
-             "-o", out_path, url],
-            timeout=300, capture_output=True,
-        )
-        return r.returncode == 0 and Path(out_path).exists()
-    except Exception as e:
-        print(f"  [VideoAnalyst] yt-dlp error: {e}")
-        return False
+    """
+    Download via yt-dlp.  Bilibili returns 412 without cookies, so we try:
+      1. Plain download (works for YouTube and non-restricted B站 content)
+      2. --cookies-from-browser chrome  (fixes B站 412)
+      3. --cookies-from-browser safari  (macOS fallback)
+    """
+    # Exclude AV1 (av01) — local FFmpeg often can't decode it for frame extraction.
+    # Prefer h264/h265 mp4 at ≤480p so ffmpeg -vf fps works reliably.
+    fmt = ("bestvideo[height<=480][ext=mp4][vcodec!^=av01]+bestaudio[ext=m4a]"
+           "/bestvideo[height<=480][vcodec^=avc]+bestaudio"
+           "/bestvideo[height<=480]+bestaudio/best[height<=480]/best")
+    base_cmd = [
+        "yt-dlp", "--format", fmt,
+        "--merge-output-format", "mp4",
+        "--no-playlist", "--quiet", "--no-warnings",
+        "-o", out_path, url,
+    ]
+
+    # Try plain first, then with browser cookies (fixes Bilibili 412).
+    # Always try all three — don't short-circuit on unexpected error messages.
+    for extra in [[], ["--cookies-from-browser", "chrome"],
+                       ["--cookies-from-browser", "safari"]]:
+        label = extra[1] if extra else "plain"
+        cmd = base_cmd[:1] + extra + base_cmd[1:]
+        try:
+            # Remove partial file from a previous failed attempt before retrying
+            part = Path(out_path + ".part")
+            if part.exists():
+                part.unlink(missing_ok=True)
+            r = subprocess.run(cmd, timeout=300, capture_output=True)
+            if r.returncode == 0 and Path(out_path).exists():
+                print(f"  [VideoAnalyst] ✅ Download OK ({label})")
+                return True
+            err = r.stderr.decode(errors="ignore").strip()
+            print(f"  [VideoAnalyst] ❌ {label}: rc={r.returncode} — {err[:200]}")
+        except Exception as e:
+            print(f"  [VideoAnalyst] ❌ {label}: exception — {e}")
+
+    return False
 
 
 def _get_duration(video_path: str) -> float:
