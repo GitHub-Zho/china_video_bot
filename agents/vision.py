@@ -33,6 +33,28 @@ _QWEN_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/complet
 _MIN_CALL_INTERVAL = 4.2
 _last_call_ts = 0.0
 
+# ── Provider health (per-process) ─────────────────────────────────────────────
+# A quota/auth failure (401/403) means the provider is dead for the whole run —
+# retrying it on every call just burns ~10s of backoff per batch. Rate limits
+# (429) usually recover, so they get a shorter cooldown.
+_down_until = {"qwen": 0.0, "gemini": 0.0}
+_QUOTA_COOLDOWN = 3600.0   # auth/quota errors: out for the rest of the run
+_RATE_COOLDOWN  = 300.0    # rate-limit bursts: retry after 5 min
+
+# Groq Llama 4 Scout rejects requests with more than 5 images.
+_GROQ_MAX_IMAGES = 5
+
+
+def _mark_down(provider: str, cooldown: float, reason: str) -> None:
+    import time
+    _down_until[provider] = time.time() + cooldown
+    print(f"  [Vision] {provider} marked unavailable for {cooldown/60:.0f} min ({reason})")
+
+
+def _is_down(provider: str) -> bool:
+    import time
+    return time.time() < _down_until[provider]
+
 
 def _throttle():
     import time
@@ -95,7 +117,16 @@ def _qwen_vision(image_paths, prompt, labels, temperature, max_tokens) -> str | 
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
         except requests.exceptions.SSLError as e:
-            last = e
+            last = e                      # transient — keep retrying
+            time.sleep(min(6, 1.0 * (attempt + 1)))
+        except requests.exceptions.HTTPError as e:
+            # 4xx = quota/auth/rate — retrying the same request won't help.
+            status = e.response.status_code if e.response is not None else 0
+            if 400 <= status < 500:
+                cooldown = _RATE_COOLDOWN if status == 429 else _QUOTA_COOLDOWN
+                _mark_down("qwen", cooldown, f"HTTP {status}")
+                return None
+            last = e                      # 5xx — transient, retry
             time.sleep(min(6, 1.0 * (attempt + 1)))
         except Exception as e:
             last = e
@@ -125,15 +156,15 @@ def analyse_images(image_paths: list[str], prompt: str,
         return None
 
     # Provider preference: Qwen (DashScope) first — China-accessible, no VPN.
-    if DASHSCOPE_API_KEY:
+    # Providers in cooldown (quota/rate errors earlier in this run) are skipped
+    # silently instead of re-walking the whole retry ladder on every call.
+    if DASHSCOPE_API_KEY and not _is_down("qwen"):
         out = _qwen_vision(image_paths, prompt, labels, temperature, max_tokens)
         if out is not None:
             return out
         print("  [Vision] Qwen unavailable — trying Gemini…")
 
-    if not GEMINI_API_KEY:
-        # No Gemini → go straight to Groq fallback
-        print("  [Vision] Falling back to Groq vision (Llama 4 Scout)…")
+    if not GEMINI_API_KEY or _is_down("gemini"):
         return _groq_vision(image_paths, prompt, labels, temperature, max_tokens)
 
     parts: list[dict] = [{"text": prompt}]
@@ -167,6 +198,8 @@ def analyse_images(image_paths: list[str], prompt: str,
                 time.sleep(wait)
                 continue
             if r.status_code in (429, 500, 503):
+                if r.status_code == 429:     # rate-limited — skip for a while
+                    _mark_down("gemini", _RATE_COOLDOWN, "HTTP 429")
                 break                        # exhausted — fall back to Groq
             r.raise_for_status()
             data = r.json()
@@ -187,11 +220,32 @@ def analyse_images(image_paths: list[str], prompt: str,
 def _groq_vision(image_paths: list[str], prompt: str,
                  labels: list[str] | None, temperature: float,
                  max_tokens: int) -> str | None:
-    """Groq Llama 4 Scout vision — free fallback when Gemini is unavailable."""
+    """Groq Llama 4 Scout vision — free fallback when Gemini is unavailable.
+
+    Scout accepts at most 5 images per request. Larger batches (e.g. QA's 20
+    frames) are split into ≤5-image chunks; per-image labels keep each frame
+    self-describing, so chunk responses are simply concatenated. JSON-array
+    prompts are re-merged by analyse_images_json.
+    """
     import os
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         return None
+
+    existing = [(i, p) for i, p in enumerate(image_paths) if Path(p).exists()]
+    if len(existing) > _GROQ_MAX_IMAGES:
+        responses = []
+        for c in range(0, len(existing), _GROQ_MAX_IMAGES):
+            chunk = existing[c:c + _GROQ_MAX_IMAGES]
+            chunk_paths  = [p for _, p in chunk]
+            chunk_labels = ([labels[i] for i, _ in chunk if i < len(labels)]
+                            if labels else None)
+            out = _groq_vision(chunk_paths, prompt, chunk_labels,
+                               temperature, max_tokens)
+            if out:
+                responses.append(out)
+        return "\n".join(responses) if responses else None
+
     try:
         from groq import Groq
         content: list[dict] = [{"type": "text", "text": prompt}]
@@ -230,14 +284,34 @@ def analyse_images_json(image_paths: list[str], prompt: str,
         if raw.startswith("json"):
             raw = raw[4:]
     raw = raw.strip()
-    # Be forgiving: extract the first {...} or [...] block if there's extra prose
     try:
         return json.loads(raw)
     except Exception:
-        m = re.search(r"(\{.*\}|\[.*\])", raw, re.DOTALL)
-        if m:
+        pass
+
+    # Be forgiving: scan for embedded JSON values (handles prose around them AND
+    # chunked Groq responses — several arrays concatenated with newlines, one
+    # per ≤5-image chunk). raw_decode respects nesting, unlike a regex.
+    dec = json.JSONDecoder()
+    parsed, idx = [], 0
+    while idx < len(raw):
+        if raw[idx] in "[{":
             try:
-                return json.loads(m.group(1))
+                obj, end = dec.raw_decode(raw, idx)
+                parsed.append(obj)
+                idx = end
+                continue
             except Exception:
-                return None
-    return None
+                pass
+        idx += 1
+
+    if not parsed:
+        return None
+    if len(parsed) == 1:
+        return parsed[0]
+    if all(isinstance(p, list) for p in parsed):
+        merged: list = []
+        for p in parsed:
+            merged.extend(p)
+        return merged
+    return parsed[0]

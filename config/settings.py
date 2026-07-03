@@ -54,7 +54,11 @@ MAX_CLIP_SECONDS  = 8.0       # never show a clip longer than this
 TARGET_YOUTUBE_SECONDS = 32   # ~8 scenes × 4s
 TARGET_REELS_SECONDS   = 20   # ~5 scenes × 4s
 
-HOOK_CARD_SECONDS = 2.0       # freeze-frame hook card at video start
+# Hook presentation. The old 2s freeze-frame card added dead air at the start —
+# fatal for short-form retention. The hook is now a title OVERLAY on the playing
+# first scene (voice starts at t=0), so it adds no duration.
+HOOK_CARD_SECONDS    = 0.0    # kept for duration math at existing call sites
+HOOK_OVERLAY_SECONDS = 2.6    # how long the hook title stays on screen
 
 # Pacing — give each scene room to breathe (avoids the rushed feel).
 SCENE_LEAD_IN     = 0.4       # subtitle appears, THEN narration starts (caption leads voice)

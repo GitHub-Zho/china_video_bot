@@ -10,3 +10,7 @@ __pycache__/
 .venv/
 .DS_Store
 pipeline.log
+
+# BGM tracks are local (user-picked, possibly large) — keep only the README
+assets/music/*
+!assets/music/README.md

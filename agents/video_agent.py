@@ -22,7 +22,7 @@ import re
 from config.settings import (
     YOUTUBE_W, YOUTUBE_H, REELS_W, REELS_H,
     FPS, SLIDE_DURATION, FADE_DURATION, OUTPUT_DIR,
-    FFMPEG_BIN, FFPROBE_BIN, HOOK_CARD_SECONDS,
+    FFMPEG_BIN, FFPROBE_BIN, HOOK_CARD_SECONDS, HOOK_OVERLAY_SECONDS,
 )
 
 
@@ -298,6 +298,45 @@ def _shift_srt(srt_path: str, offset_ms: int) -> str:
     return tmp
 
 
+# ── Background music ──────────────────────────────────────────────────────────
+
+_MUSIC_DIR = _PROJECT_ROOT / "assets" / "music"
+_MUSIC_EXTS = {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg"}
+
+def _pick_music(seed: str) -> str | None:
+    """
+    Pick a background track from assets/music/, deterministically per video id
+    (so youtube + reels variants — and QA re-renders — get the same track).
+    Returns None when the folder is empty; the mix step then skips BGM.
+    """
+    if not _MUSIC_DIR.exists():
+        return None
+    tracks = sorted(p for p in _MUSIC_DIR.iterdir()
+                    if p.suffix.lower() in _MUSIC_EXTS)
+    if not tracks:
+        return None
+    rng = random.Random(seed)
+    return str(rng.choice(tracks))
+
+
+# Voice loudness target (EBU R128). -16 LUFS is the platform-recommended level
+# for online video; without this, TTS output loudness varies run to run.
+_LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11"
+
+# Ducked BGM graph: music loops under the voice at low volume and dips
+# (sidechain compression) whenever the voice speaks.
+#
+#     voice ── loudnorm ─┬────────────────────────┐
+#                        └─(sidechain)─┐          ├─ amix → [aout]
+#     music ── volume=0.30 ── sidechaincompress ──┘
+_DUCKED_MIX = (
+    "[1:a]" + _LOUDNORM + ",asplit=2[vo][vo_sc];"
+    "[2:a]volume=0.30[mus];"
+    "[mus][vo_sc]sidechaincompress=threshold=0.02:ratio=8:attack=150:release=900[duck];"
+    "[vo][duck]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+)
+
+
 # ── Subtitle burn ─────────────────────────────────────────────────────────────
 
 def _corner_label_filter(text: str, video_w: int, video_h: int, tmp_dir: Path) -> str:
@@ -317,15 +356,60 @@ def _corner_label_filter(text: str, video_w: int, video_h: int, tmp_dir: Path) -
             f"x={pad}:y={pad}:textfile={tf}")
 
 
+def _hook_overlay_filter(hook_text: str, video_w: int, video_h: int,
+                         tmp_dir: Path, duration: float) -> str:
+    """
+    Large hook title burned over the FIRST seconds of the playing video
+    (replaces the old frozen hook card — no dead air, voice starts at t=0).
+    Fades out over the last 0.5s of its window. Returns a ','-prefixed
+    drawtext chain, or '' when hook_text is empty.
+    """
+    import textwrap
+    if not hook_text:
+        return ""
+    font = _caption_font()
+    font_arg = f"fontfile={font.replace(':', chr(92)+':')}:" if font else ""
+
+    line_h    = int(video_w * 0.058)
+    char_w    = 0.46 * line_h
+    max_chars = max(10, int((video_w * 0.86) / char_w))
+    lines     = textwrap.wrap(hook_text, width=max_chars)
+    line_gap  = int(line_h * 1.25)
+    total_h   = len(lines) * line_gap
+    start_y   = int(video_h * 0.38) - total_h // 2   # upper-middle, clear of subs
+
+    fade_start = duration - 0.5
+    alpha = f"if(lt(t\\,{fade_start:.2f})\\,1\\,max(0\\,({duration:.2f}-t)/0.5))"
+
+    parts = []
+    for i, line in enumerate(lines):
+        lf = tmp_dir / f"hook_{i}.txt"
+        lf.write_text(line, encoding="utf-8")
+        tf = str(lf).replace(":", "\\:")
+        parts.append(
+            f"drawtext={font_arg}"
+            f"fontsize={line_h}:fontcolor=white:borderw=5:bordercolor=black@0.9:"
+            f"box=1:boxcolor=black@0.5:boxborderw=16:"
+            f"x=(w-tw)/2:y={start_y + i * line_gap}:"
+            f"textfile={tf}:alpha='{alpha}':"
+            f"enable='between(t,0,{duration:.2f})'"
+        )
+    return "," + ",".join(parts)
+
+
 def _burn_subtitles(raw_path: str, audio_path: str,
                     srt_path: str, out_path: str,
                     subtitle_offset_ms: int = 0,
                     video_w: int = 1920, video_h: int = 1080,
                     params: VideoRenderParams | None = None,
-                    corner_label: str = "") -> None:
+                    corner_label: str = "",
+                    hook_text: str = "",
+                    music_path: str | None = None) -> None:
     """Attach audio + burn subtitles: raw video → final MP4.
 
     corner_label: persistent topic badge (top-left) shown on the whole video.
+    hook_text:    title overlaid on the first seconds of the video.
+    music_path:   optional BGM, looped + ducked under the voice.
     """
     if params is None:
         params = VideoRenderParams()
@@ -351,37 +435,64 @@ def _burn_subtitles(raw_path: str, audio_path: str,
 
     label_dir = Path(tempfile.mkdtemp(prefix="label_"))
     label_vf  = _corner_label_filter(corner_label, video_w, video_h, label_dir)
+    hook_vf   = _hook_overlay_filter(hook_text, video_w, video_h, label_dir,
+                                     HOOK_OVERLAY_SECONDS)
+    overlays  = label_vf + hook_vf
 
+    # Build the video filter CHAIN (no -vf prefix — it may go into -vf OR into
+    # a -filter_complex branch, depending on whether music is mixed in).
     if mode == "copy":
-        vf_args = ["-vf", label_vf[1:]] if label_vf else []
+        vf_chain = overlays[1:] if overlays else ""
     elif mode == "libass":
         font_size = max(20, int(video_h * (params.fontsize_pct * 0.8)))
         margin_v  = int(video_h * (1 - params.subtitle_y))
         safe_srt  = active_srt.replace("\\", "/").replace(":", "\\:")
-        vf_args   = [
-            "-vf",
-            f"subtitles={safe_srt}:"
-            f"force_style='FontName=Arial Bold,FontSize={font_size},Bold=1,"
+        # Use the bundled Anton via fontsdir so libass matches the drawtext look
+        fonts_dir = str(_PROJECT_ROOT / "assets" / "fonts").replace(":", "\\:")
+        font_name = "Anton" if (_PROJECT_ROOT / "assets" / "fonts"
+                                / "Anton-Regular.ttf").exists() else "Arial Bold"
+        vf_chain = (
+            f"subtitles={safe_srt}:fontsdir={fonts_dir}:"
+            f"force_style='FontName={font_name},FontSize={font_size},Bold=1,"
             f"PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
             f"BackColour=&H80000000,"
             f"Outline=2,Shadow=1,BorderStyle=4,"
-            f"Alignment=2,MarginV={margin_v}'{label_vf}"
-        ]
+            f"Alignment=2,MarginV={margin_v}'{overlays}"
+        )
     else:
         cue_dir = Path(tempfile.mkdtemp(prefix="cues_"))
-        vf_args = ["-vf", _drawtext_filter(active_srt, cue_dir, video_w, video_h,
-                                           fontsize_pct=params.fontsize_pct,
-                                           subtitle_y=params.subtitle_y,
-                                           max_cue_dur=params.max_cue_dur) + label_vf]
+        vf_chain = _drawtext_filter(active_srt, cue_dir, video_w, video_h,
+                                    fontsize_pct=params.fontsize_pct,
+                                    subtitle_y=params.subtitle_y,
+                                    max_cue_dur=params.max_cue_dur) + overlays
+
+    # FFmpeg forbids mixing -vf with -filter_complex, so when music is mixed in
+    # the video chain moves inside the complex graph as a [0:v]…[vout] branch.
+    if music_path:
+        music_inputs = ["-stream_loop", "-1", "-i", music_path]
+        if vf_chain:
+            graph = f"[0:v]{vf_chain}[vout];{_DUCKED_MIX}"
+            filter_args = ["-filter_complex", graph,
+                           "-map", "[vout]", "-map", "[aout]"]
+            codec_v = "libx264"
+        else:
+            filter_args = ["-filter_complex", _DUCKED_MIX,
+                           "-map", "0:v", "-map", "[aout]"]
+            codec_v = "copy"
+    else:
+        music_inputs = []
+        filter_args = (["-vf", vf_chain] if vf_chain else []) + ["-af", _LOUDNORM]
+        codec_v = "libx264" if vf_chain else "copy"
 
     cmd = [
         FFMPEG_BIN, "-y",
         "-i", raw_path,
         "-i", active_audio,
-        *vf_args,
-        "-c:v", "libx264" if vf_args else "copy",
+        *music_inputs,
+        *filter_args,
+        "-c:v", codec_v,
         "-crf", "20", "-preset", "fast",
-        "-c:a", "aac",
+        "-c:a", "aac", "-b:a", "192k",
         "-shortest",
         "-movflags", "+faststart",
         "-pix_fmt", "yuv420p",
@@ -477,75 +588,6 @@ def _drawtext_filter(srt_path: str, tmp_dir: Path,
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-# ── Hook card ─────────────────────────────────────────────────────────────────
-
-def _make_hook_card(hook_text: str, first_clip: str,
-                    w: int, h: int, duration: float, out: str) -> bool:
-    """
-    Freeze the first frame of first_clip and burn large hook text on top.
-    Creates a HOOK_CARD_SECONDS-long card that prepends the video.
-
-    hook_text: the Director's hook line (1 sentence)
-    """
-    import textwrap
-
-    # Hook uses the same bundled Anton font as subtitles (consistent brand look)
-    font_path = _caption_font()
-    font_arg  = f"fontfile={font_path.replace(':', chr(92)+':')}:" if font_path else ""
-
-    # Font size based on WIDTH (not height) so vertical Reels don't get giant text.
-    # Wrap width computed from actual frame width + font size so text never clips.
-    line_h     = int(w * 0.058)              # Anton condensed → can go a bit bigger
-    char_w     = 0.46 * line_h               # Anton glyph width (condensed)
-    max_chars  = max(10, int((w * 0.86) / char_w))
-    lines      = textwrap.wrap(hook_text, width=max_chars)
-    line_gap   = int(line_h * 1.25)
-    total_h    = len(lines) * line_gap
-    start_y    = (h - total_h) // 2          # vertically centred
-
-    # Write each line to a textfile (robust — no escaping leak like text= had)
-    cue_dir = Path(tempfile.mkdtemp(prefix="hook_"))
-    dt_with_box = []
-    for i, line in enumerate(lines):
-        lf = cue_dir / f"hook_{i}.txt"
-        lf.write_text(line, encoding="utf-8")
-        tf_path = str(lf).replace(":", "\\:")
-        y = start_y + i * line_gap
-        dt_with_box.append(
-            f"drawtext={font_arg}"
-            f"fontsize={line_h}:fontcolor=white:borderw=5:bordercolor=black@0.9:"
-            f"box=1:boxcolor=black@0.5:boxborderw=16:"
-            f"x=(w-tw)/2:y={y}:"
-            f"textfile={tf_path}"
-        )
-
-    vf_filter = ",".join(dt_with_box)
-
-    # Fade out last 0.4s so the cut to first scene is smooth, not jarring
-    fade_start = max(0, duration - 0.4)
-    fade_filter = f"fade=t=out:st={fade_start:.2f}:d=0.4"
-
-    cmd = [
-        FFMPEG_BIN, "-y",
-        "-i", first_clip,
-        "-vf", (f"trim=0:{HOOK_CARD_SECONDS},setpts=PTS-STARTPTS,"
-                f"{vf_filter},{fade_filter}"),
-        "-t", str(duration),
-        "-r", str(FPS),
-        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-        "-an", "-pix_fmt", "yuv420p",
-        out,
-    ]
-    r = subprocess.run(cmd, capture_output=True)
-    # Clean up hook text files
-    for f in cue_dir.iterdir():
-        f.unlink(missing_ok=True)
-    cue_dir.rmdir()
-    if r.returncode != 0:
-        print(f"  [Video] Hook card failed (non-fatal): {r.stderr[-300:].decode(errors='replace')}")
-    return r.returncode == 0
-
-
 def assemble_video(video_id: str, media_items, audio_path: str,
                    srt_path: str, hook_text: str = "",
                    scene_durations: list[float] | None = None,
@@ -555,8 +597,9 @@ def assemble_video(video_id: str, media_items, audio_path: str,
     Build YouTube (16:9) and Reels (9:16) MP4s from mixed media.
 
     media_items: list of MediaItem(path, kind) OR list of str (legacy photo-only)
-    hook_text:   if provided, a HOOK_CARD_SECONDS freeze-frame with bold text
-                 is prepended to the video.
+    hook_text:   if provided, burned as a large title overlay on the first
+                 HOOK_OVERLAY_SECONDS of the video (voice starts at t=0 —
+                 no frozen card, no dead air).
     scene_durations: Phase 1 — per-scene durations from TTS. When provided,
                  segment i is rendered at scene_durations[i] (clamped to
                  [MIN_CLIP_SECONDS, MAX_CLIP_SECONDS]) so visuals stay in sync
@@ -567,6 +610,9 @@ def assemble_video(video_id: str, media_items, audio_path: str,
 
     if params is None:
         params = VideoRenderParams()
+
+    # One BGM track per video id — youtube + reels variants stay consistent.
+    music_path = _pick_music(video_id)
 
     # Normalise legacy str list → MediaItem list
     from agents.media_agent import MediaItem
@@ -632,17 +678,6 @@ def assemble_video(video_id: str, media_items, audio_path: str,
             if len(segment_paths) < 2:
                 raise RuntimeError("Too few segments rendered successfully")
 
-            # ── Step 1b: hook card (prepend if hook_text provided) ────
-            has_hook = False
-            if hook_text and segment_paths:
-                hook_seg = str(tmp_dir / "seg_hook.mp4")
-                ok = _make_hook_card(hook_text, segment_paths[0],
-                                     w, h, HOOK_CARD_SECONDS, hook_seg)
-                if ok and Path(hook_seg).stat().st_size > 1000:
-                    segment_paths = [hook_seg] + segment_paths
-                    has_hook = True
-                    print(f"  [Video] ✅ Hook card added ({HOOK_CARD_SECONDS}s)")
-
             # ── Step 2: get audio duration ────────────────────────────
             probe = subprocess.run(
                 [FFPROBE_BIN, "-v", "quiet", "-show_entries", "format=duration",
@@ -650,7 +685,6 @@ def assemble_video(video_id: str, media_items, audio_path: str,
                 capture_output=True, text=True,
             )
             audio_dur = float(probe.stdout.strip())
-            hook_dur  = HOOK_CARD_SECONDS if has_hook else 0
 
             # Total content duration from what we actually rendered
             content_dur = sum(rendered_durs)
@@ -658,10 +692,9 @@ def assemble_video(video_id: str, media_items, audio_path: str,
             # Only loop if content is meaningfully shorter than audio.
             # With per-scene durations, content_dur ≈ audio_dur, so this is skipped.
             if content_dur < audio_dur - 1.0:
-                content_segs = segment_paths[1:] if has_hook else segment_paths
-                avg = content_dur / max(len(content_segs), 1)
+                avg = content_dur / max(len(segment_paths), 1)
                 needed = int((audio_dur - content_dur) / max(avg, 1)) + 1
-                extra  = (content_segs * (needed // max(len(content_segs), 1) + 1))[:needed]
+                extra  = (segment_paths * (needed // max(len(segment_paths), 1) + 1))[:needed]
                 segment_paths = segment_paths + extra
                 print(f"  [Video] Content {content_dur:.1f}s < audio {audio_dur:.1f}s "
                       f"— looped {len(extra)} extra segment(s)")
@@ -675,7 +708,7 @@ def assemble_video(video_id: str, media_items, audio_path: str,
             r = subprocess.run([
                 FFMPEG_BIN, "-y", "-f", "concat", "-safe", "0",
                 "-i", str(list_file),
-                "-t", str(audio_dur + hook_dur),
+                "-t", str(audio_dur),
                 "-c:v", "copy", raw_mp4,
             ], capture_output=True)
             if r.returncode != 0:
@@ -687,11 +720,14 @@ def assemble_video(video_id: str, media_items, audio_path: str,
             subprocess.run([FFMPEG_BIN, "-y", "-i", raw_mp4,
                             "-c:v", "copy", raw_keep], capture_output=True)
 
-            # ── Step 4: audio + subtitles → final ────────────────────
+            # ── Step 4: audio + subtitles + hook overlay + BGM → final ─
+            if music_path:
+                print(f"  [Video] 🎵 BGM: {Path(music_path).name} (ducked under voice)")
             _burn_subtitles(raw_mp4, audio_path, srt_path, out_path,
-                            subtitle_offset_ms=int(hook_dur * 1000),
                             video_w=w, video_h=h, params=params,
-                            corner_label=corner_label)
+                            corner_label=corner_label,
+                            hook_text=hook_text,
+                            music_path=music_path)
 
         finally:
             # Clean up temp segments
@@ -727,12 +763,26 @@ def rerender_subtitles(video_id: str, variant: str,
         print(f"  [Video] rerender: missing raw/audio/srt for {video_id}/{variant}")
         return None
 
+    # Hook overlay + BGM are applied at the final-encode stage (not baked into
+    # the raw video), so a re-burn must re-apply them. Hook text comes from the
+    # saved metadata; _pick_music is seeded by video_id → same track as before.
+    hook_text = ""
+    meta = base / "metadata.json"
+    if meta.exists():
+        try:
+            import json as _json
+            hook_text = _json.loads(meta.read_text()).get("hook", "")
+        except Exception:
+            pass
+
     w, h = (YOUTUBE_W, YOUTUBE_H) if variant == "youtube" else (REELS_W, REELS_H)
     print(f"  [Video] Re-burning {variant} subtitles "
           f"(font={params.fontsize_pct:.3f}, y={params.subtitle_y:.2f})…")
     _burn_subtitles(str(raw), str(audio), str(srt), str(out),
                     subtitle_offset_ms=int(hook_seconds * 1000),
-                    video_w=w, video_h=h, params=params)
+                    video_w=w, video_h=h, params=params,
+                    hook_text=hook_text,
+                    music_path=_pick_music(video_id))
     return str(out)
 
 
