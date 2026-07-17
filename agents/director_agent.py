@@ -35,25 +35,31 @@ CRITIC_PASS_SCORE = 7
 MAX_RETRIES = 2
 
 
+# Qwen text health (per-process): a 4xx (quota/auth) means the model is dead
+# for this run — skip it instead of burning ~52s of retries on every call.
+_qwen_text_down_until = 0.0
+
+
 def _llm_chat(system: str, user: str, temperature: float = 0.75,
               max_tokens: int = 1800) -> str:
     """
     Text generation for the Director/Critic. Prefers Qwen (DashScope) when its key
-    is set — China-direct, reliable — else falls back to Groq. Raises on failure.
+    is set — China-direct, reliable — falls back to Groq. Raises only when every
+    provider fails.
     """
+    global _qwen_text_down_until
+    import time
     dash = os.getenv("DASHSCOPE_API_KEY")
-    if dash:
-        import time, requests, urllib3
+    if dash and time.time() >= _qwen_text_down_until:
+        import requests, urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         payload = {"model": QWEN_TEXT_MODEL,
                    "messages": [{"role": "system", "content": system},
                                 {"role": "user", "content": user}],
                    "temperature": temperature, "max_tokens": max_tokens}
         headers = {"Authorization": f"Bearer {dash}", "Content-Type": "application/json"}
-        last = None
-        # Retry hard — DashScope over a flaky/proxied connection drops big requests
-        # with SSL EOF; a transient fail must NOT silently fall back to a generic
-        # template (which would lose the user's topic).
+        # Retry hard on TRANSIENT errors (SSL EOF on flaky/proxied connections) —
+        # but a 4xx (quota/auth/rate) will not change on retry: fail fast to Groq.
         sess = requests.Session()
         for attempt in range(10):
             try:
@@ -63,10 +69,19 @@ def _llm_chat(system: str, user: str, temperature: float = 0.75,
                     verify=(attempt % 2 == 0), timeout=90)
                 r.raise_for_status()
                 return r.json()["choices"][0]["message"]["content"]
-            except Exception as e:
-                last = e
+            except requests.exceptions.HTTPError as e:
+                status = e.response.status_code if e.response is not None else 0
+                if 400 <= status < 500:
+                    cooldown = 300 if status == 429 else 3600
+                    _qwen_text_down_until = time.time() + cooldown
+                    print(f"  [Director] Qwen text HTTP {status} — using Groq "
+                          f"for {cooldown//60} min")
+                    break
                 time.sleep(min(8, 1.0 * (attempt + 1)))
-        raise last
+            except Exception:
+                time.sleep(min(8, 1.0 * (attempt + 1)))
+        else:
+            print("  [Director] Qwen unreachable after retries — using Groq")
     # Fallback: Groq
     resp = Groq(api_key=os.getenv("GROQ_API_KEY")).chat.completions.create(
         model=GROQ_MODEL,

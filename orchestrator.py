@@ -239,11 +239,22 @@ def apply_alternative(video_id: str, scene_index: int, pick: int) -> str:
     for f in ("youtube.mp4", "reels.mp4", "youtube_raw.mp4", "reels_raw.mp4"):
         (base / f).unlink(missing_ok=True)
 
+    # Topic label from metadata (keeps the corner badge and the music bucket
+    # consistent with the original render)
+    topic_label = ""
+    meta_f = base / "metadata.json"
+    if meta_f.exists():
+        try:
+            topic_label = json.loads(meta_f.read_text()).get("topic", "")
+        except Exception:
+            pass
+
     print("  [Fix] Re-assembling video…")
     paths = assemble_video(video_id, media_items,
                            str(base / "audio.mp3"), str(base / "subtitles.srt"),
                            hook_text=state.get("hook", ""),
-                           scene_durations=state["scene_durations"])
+                           scene_durations=state["scene_durations"],
+                           corner_label=topic_label)
     print(f"  [Fix] ✅ Rebuilt: {paths.get('youtube')}")
     return paths.get("youtube", "")
 
