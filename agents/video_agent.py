@@ -404,12 +404,14 @@ def _burn_subtitles(raw_path: str, audio_path: str,
                     params: VideoRenderParams | None = None,
                     corner_label: str = "",
                     hook_text: str = "",
-                    music_path: str | None = None) -> None:
+                    music_path: str | None = None,
+                    music_offset: float = 0.0) -> None:
     """Attach audio + burn subtitles: raw video → final MP4.
 
     corner_label: persistent topic badge (top-left) shown on the whole video.
     hook_text:    title overlaid on the first seconds of the video.
     music_path:   optional BGM, looped + ducked under the voice.
+    music_offset: start the music this many seconds in (beat alignment).
     """
     if params is None:
         params = VideoRenderParams()
@@ -469,7 +471,10 @@ def _burn_subtitles(raw_path: str, audio_path: str,
     # FFmpeg forbids mixing -vf with -filter_complex, so when music is mixed in
     # the video chain moves inside the complex graph as a [0:v]…[vout] branch.
     if music_path:
-        music_inputs = ["-stream_loop", "-1", "-i", music_path]
+        music_inputs = ["-stream_loop", "-1"]
+        if music_offset > 0:
+            music_inputs += ["-ss", f"{music_offset:.3f}"]
+        music_inputs += ["-i", music_path]
         if vf_chain:
             graph = f"[0:v]{vf_chain}[vout];{_DUCKED_MIX}"
             filter_args = ["-filter_complex", graph,
@@ -611,8 +616,20 @@ def assemble_video(video_id: str, media_items, audio_path: str,
     if params is None:
         params = VideoRenderParams()
 
-    # One BGM track per video id — youtube + reels variants stay consistent.
-    music_path = _pick_music(video_id)
+    # BGM: beat-aligned selection when we know the cut layout (选曲+卡点);
+    # random library pick otherwise. Same (track, offset) for both variants.
+    music_path, music_offset = None, 0.0
+    if scene_durations:
+        try:
+            from agents.music_agent import pick_music_for_video
+            picked = pick_music_for_video(video_id, scene_durations,
+                                          topic=corner_label)
+            if picked:
+                music_path, music_offset = picked
+        except Exception as e:
+            print(f"  [Music] selector error ({e}) — random pick")
+    if music_path is None:
+        music_path = _pick_music(video_id)
 
     # Normalise legacy str list → MediaItem list
     from agents.media_agent import MediaItem
@@ -622,13 +639,17 @@ def assemble_video(video_id: str, media_items, audio_path: str,
     if len(media_items) < 2:
         raise ValueError(f"Need ≥2 media items, got {len(media_items)}")
 
-    # Resolve per-segment durations
+    # Resolve per-segment durations.
+    # Aligned durations are ground truth from the voice track — clamping them
+    # would desynchronize every later scene, so we only sanity-warn.
     def _seg_duration(i: int) -> float:
         if scene_durations and i < len(scene_durations):
             d = scene_durations[i]
             if d <= 0:
                 return SLIDE_DURATION
-            return max(MIN_CLIP_SECONDS, min(MAX_CLIP_SECONDS, d))
+            if not (MIN_CLIP_SECONDS * 0.5 <= d <= MAX_CLIP_SECONDS * 1.5):
+                print(f"    [Video] ⚠️  scene {i} unusual duration {d:.1f}s (kept)")
+            return d
         return SLIDE_DURATION
 
     out_dir = Path(OUTPUT_DIR) / video_id
@@ -727,7 +748,8 @@ def assemble_video(video_id: str, media_items, audio_path: str,
                             video_w=w, video_h=h, params=params,
                             corner_label=corner_label,
                             hook_text=hook_text,
-                            music_path=music_path)
+                            music_path=music_path,
+                            music_offset=music_offset)
 
         finally:
             # Clean up temp segments
@@ -764,16 +786,37 @@ def rerender_subtitles(video_id: str, variant: str,
         return None
 
     # Hook overlay + BGM are applied at the final-encode stage (not baked into
-    # the raw video), so a re-burn must re-apply them. Hook text comes from the
-    # saved metadata; _pick_music is seeded by video_id → same track as before.
-    hook_text = ""
+    # the raw video), so a re-burn must re-apply them. Hook text and cut layout
+    # come from the saved state files; the beat-aligned selector is
+    # deterministic, so the re-render picks the same (track, offset).
+    import json as _json
+    hook_text, durations, topic = "", None, ""
     meta = base / "metadata.json"
     if meta.exists():
         try:
-            import json as _json
-            hook_text = _json.loads(meta.read_text()).get("hook", "")
+            m = _json.loads(meta.read_text())
+            hook_text = m.get("hook", "")
+            topic     = m.get("topic", "")
         except Exception:
             pass
+    state = base / "render_state.json"
+    if state.exists():
+        try:
+            durations = _json.loads(state.read_text()).get("scene_durations")
+        except Exception:
+            pass
+
+    music_path, music_offset = None, 0.0
+    if durations:
+        try:
+            from agents.music_agent import pick_music_for_video
+            picked = pick_music_for_video(video_id, durations, topic=topic)
+            if picked:
+                music_path, music_offset = picked
+        except Exception:
+            pass
+    if music_path is None:
+        music_path = _pick_music(video_id)
 
     w, h = (YOUTUBE_W, YOUTUBE_H) if variant == "youtube" else (REELS_W, REELS_H)
     print(f"  [Video] Re-burning {variant} subtitles "
@@ -782,7 +825,7 @@ def rerender_subtitles(video_id: str, variant: str,
                     subtitle_offset_ms=int(hook_seconds * 1000),
                     video_w=w, video_h=h, params=params,
                     hook_text=hook_text,
-                    music_path=_pick_music(video_id))
+                    music_path=music_path, music_offset=music_offset)
     return str(out)
 
 

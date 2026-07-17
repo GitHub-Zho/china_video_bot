@@ -1,0 +1,25 @@
+{
+  "_comment": "Topic keyword → music bucket. Edit freely — first matching keyword wins (substring match on the topic, case-insensitive). Buckets: upbeat | chill | cinematic.",
+  "map": {
+    "food": "upbeat",
+    "street": "upbeat",
+    "market": "upbeat",
+    "duck": "upbeat",
+    "hot pot": "upbeat",
+    "noodle": "upbeat",
+    "snack": "upbeat",
+    "history": "cinematic",
+    "temple": "cinematic",
+    "palace": "cinematic",
+    "wall": "cinematic",
+    "culture": "cinematic",
+    "tradition": "cinematic",
+    "scenery": "chill",
+    "lake": "chill",
+    "mountain": "chill",
+    "river": "chill",
+    "garden": "chill",
+    "tea": "chill"
+  },
+  "default": "cinematic"
+}

@@ -60,10 +60,20 @@ TARGET_REELS_SECONDS   = 20   # ~5 scenes × 4s
 HOOK_CARD_SECONDS    = 0.0    # kept for duration math at existing call sites
 HOOK_OVERLAY_SECONDS = 2.6    # how long the hook title stays on screen
 
-# Pacing — give each scene room to breathe (avoids the rushed feel).
+# Pacing — LEGACY per-scene synthesis constants. The passage-mode voice path
+# (whole narration synthesized in one pass, scene boundaries recovered by
+# whisper alignment) does NOT insert these fixed silences — pauses come from
+# the TTS model's natural prosody. Kept for the legacy fallback path only.
 SCENE_LEAD_IN     = 0.4       # subtitle appears, THEN narration starts (caption leads voice)
 SCENE_TAIL        = 0.6       # silent beat after the line before the next scene
 MIN_SCENE_SECONDS = 3.2       # each scene holds at least this long (short lines still breathe)
+
+# ── Voice (passage mode) ──────────────────────────────────────────────────────
+TTS_ENGINE   = os.getenv("TTS_ENGINE", "auto")   # auto | chatterbox | kokoro
+CHATTERBOX_EXAGGERATION = 0.45   # 0.5 = neutral; tuned once, then FIXED (no per-scene AI)
+CHATTERBOX_CFG          = 0.50
+WHISPER_ALIGN_MODEL = os.getenv("WHISPER_ALIGN_MODEL", "base.en")  # word-timestamp alignment
+SRT_LEAD_SECONDS    = 0.35    # subtitle appears this much before its sentence is spoken
 HOOK_TO_FIRST_GAP = 0.7       # extra breath after the hook card before the first word
 
 # === Publishing — YouTube ===

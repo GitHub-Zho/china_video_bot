@@ -185,7 +185,227 @@ async def _generate_edge_async(script: str, audio_path: str, srt_path: str) -> N
     Path(srt_path).write_text("\n".join(all_blocks), encoding="utf-8")
 
 
-# ── Per-scene generation (Phase 1 — SRT-driven timing) ────────────────────────
+# ── Passage mode: whole-narration synthesis + whisper alignment ───────────────
+# WHY: synthesizing each scene separately gives every sentence an identical
+# "fresh start → full stop → 1s dead air" contour — the robotic 念稿 feel.
+# Synthesizing the WHOLE passage lets the TTS model connect sentences with
+# natural varied pauses (audiobook / movie-recap flow). Scene boundaries are
+# then recovered from the audio via word-level whisper alignment.
+
+def _split_for_tts(text: str, max_chars: int = 300) -> list[str]:
+    """Group sentences into chunks ≤ max_chars (engine token-limit safety).
+    Chunks join WITHOUT inserted silence — boundaries are sentence ends anyway."""
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text.strip()) if s.strip()]
+    chunks, cur = [], ""
+    for s in sentences:
+        if cur and len(cur) + len(s) + 1 > max_chars:
+            chunks.append(cur)
+            cur = s
+        else:
+            cur = f"{cur} {s}".strip()
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def _synth_chatterbox(passage: str) -> tuple["object", int] | None:
+    """Chatterbox (local, MIT) — natural narrator prosody, fixed exaggeration.
+    Optional: needs `pip install chatterbox-tts` (~2GB torch). Returns None if absent."""
+    try:
+        import torch
+        from chatterbox.tts import ChatterboxTTS
+    except ImportError:
+        return None
+    from config.settings import CHATTERBOX_EXAGGERATION, CHATTERBOX_CFG
+    try:
+        device = ("mps" if torch.backends.mps.is_available()
+                  else "cuda" if torch.cuda.is_available() else "cpu")
+        model = ChatterboxTTS.from_pretrained(device=device)
+        parts = []
+        for chunk in _split_for_tts(passage):
+            wav = model.generate(chunk,
+                                 exaggeration=CHATTERBOX_EXAGGERATION,
+                                 cfg_weight=CHATTERBOX_CFG)
+            parts.append(wav.squeeze(0).cpu().numpy())
+        import numpy as np
+        print(f"  [Voice] ✅ Chatterbox ({device}, exaggeration="
+              f"{CHATTERBOX_EXAGGERATION})")
+        return np.concatenate(parts), model.sr
+    except Exception as e:
+        print(f"  [Voice] Chatterbox error ({e}) — falling back to Kokoro")
+        return None
+
+
+def _synth_kokoro_passage(passage: str) -> tuple["object", int] | None:
+    """Kokoro, whole-passage mode: chunked on sentence boundaries, concatenated
+    with NO inserted silence — pauses are whatever the model renders."""
+    try:
+        from kokoro_onnx import Kokoro
+        import numpy as np
+    except ImportError:
+        return None
+    if not Path(KOKORO_MODEL).exists() or not Path(KOKORO_VOICES).exists():
+        return None
+    try:
+        k = Kokoro(KOKORO_MODEL, KOKORO_VOICES)
+        parts, sr = [], 24000
+        for chunk in _split_for_tts(passage):
+            samples, sr = k.create(chunk, voice=KOKORO_VOICE, speed=KOKORO_SPEED)
+            parts.append(samples)
+        return np.concatenate(parts), sr
+    except Exception as e:
+        print(f"  [Voice] Kokoro passage error ({e})")
+        return None
+
+
+def _norm_word(w: str) -> str:
+    return re.sub(r"[^a-z0-9']", "", w.lower())
+
+
+def _align_scene_boundaries(wav_path: str, narrations: list[str],
+                            total_dur: float) -> list[tuple[float, float]] | None:
+    """
+    Recover (voice_start, voice_end) per scene from the synthesized audio using
+    faster-whisper word timestamps. TTS audio is clean, so alignment is precise.
+
+    Word counts between script and transcription can drift (numbers, hyphens),
+    so scenes are mapped proportionally by word count, then each boundary is
+    snapped to the nearest transcribed word matching the scene's opening words.
+    Returns None if whisper is unavailable (caller falls back to proportional).
+    """
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        print("  [Voice] faster-whisper not installed — proportional timing")
+        return None
+    from config.settings import WHISPER_ALIGN_MODEL
+    try:
+        model = WhisperModel(WHISPER_ALIGN_MODEL, device="auto", compute_type="int8")
+        segments, _ = model.transcribe(wav_path, word_timestamps=True,
+                                       language="en", beam_size=1)
+        words = [(w.word.strip(), w.start, w.end)
+                 for seg in segments for w in (seg.words or [])]
+    except Exception as e:
+        print(f"  [Voice] whisper alignment error ({e}) — proportional timing")
+        return None
+    if len(words) < len(narrations):
+        return None
+
+    scene_wc  = [max(1, len(n.split())) for n in narrations]
+    total_wc  = sum(scene_wc)
+    n_words   = len(words)
+    norm_tx   = [_norm_word(w) for w, _, _ in words]
+
+    # Proportional first-word index per scene, snapped to a local text match
+    bounds_idx = []
+    cum = 0
+    for i, wc in enumerate(scene_wc):
+        approx = round(cum / total_wc * n_words)
+        first  = [_norm_word(w) for w in narrations[i].split()[:2] if _norm_word(w)]
+        best   = min(max(0, approx), n_words - 1)
+        if first:
+            for j in range(max(0, approx - 4), min(n_words, approx + 5)):
+                if norm_tx[j] == first[0]:
+                    if (len(first) < 2 or j + 1 >= n_words
+                            or norm_tx[j + 1] == first[1]
+                            or abs(j - approx) < abs(best - approx)):
+                        best = j
+                        break
+        bounds_idx.append(best)
+        cum += wc
+    bounds_idx[0] = 0
+
+    spans = []
+    for i in range(len(narrations)):
+        w_start = words[bounds_idx[i]][1]
+        end_idx = bounds_idx[i + 1] - 1 if i + 1 < len(narrations) else n_words - 1
+        w_end   = words[max(bounds_idx[i], end_idx)][2]
+        spans.append((w_start, min(w_end, total_dur)))
+    return spans
+
+
+def _generate_passage_scenes(
+    narrations: list[str], audio_path: str, srt_path: str
+) -> list[float] | None:
+    """
+    Passage-mode voice generation. Returns per-scene durations, or None to
+    let the caller fall back to the legacy per-scene path.
+    """
+    import soundfile as sf
+    import subprocess
+    import tempfile
+    import numpy as np
+    from config.settings import FFMPEG_BIN, TTS_ENGINE, SRT_LEAD_SECONDS
+
+    texts = [n.strip() for n in narrations]
+    passage = " ".join(t for t in texts if t)
+    if not passage:
+        return None
+
+    # ── Synthesize (engine chain) ────────────────────────────────────────────
+    out = None
+    if TTS_ENGINE in ("auto", "chatterbox"):
+        out = _synth_chatterbox(passage)
+    if out is None and TTS_ENGINE in ("auto", "kokoro"):
+        out = _synth_kokoro_passage(passage)
+    if out is None:
+        return None
+    samples, sr = out
+    total_dur = len(samples) / sr
+
+    wav_tmp = tempfile.mktemp(suffix=".wav")
+    sf.write(wav_tmp, np.asarray(samples, dtype="float32"), sr)
+    r = subprocess.run([FFMPEG_BIN, "-y", "-i", wav_tmp,
+                        "-codec:a", "libmp3lame", "-qscale:a", "4", audio_path],
+                       capture_output=True)
+    if r.returncode != 0:
+        Path(wav_tmp).unlink(missing_ok=True)
+        print("  [Voice] MP3 conversion failed")
+        return None
+
+    # ── Recover scene boundaries ─────────────────────────────────────────────
+    spans = _align_scene_boundaries(wav_tmp, texts, total_dur)
+    Path(wav_tmp).unlink(missing_ok=True)
+    if spans is None:
+        # Proportional fallback — audio still flows; only cut timing is approximate
+        wc = [max(1, len(t.split())) for t in texts]
+        total_wc, t0 = sum(wc), 0.0
+        spans = []
+        for c in wc:
+            t1 = t0 + total_dur * c / total_wc
+            spans.append((t0, t1 - 0.15))
+            t0 = t1
+        print("  [Voice] ⚠️  proportional scene timing (alignment unavailable)")
+
+    # Scene i runs from its first spoken word to the start of scene i+1
+    # (trailing pause belongs to the scene that just spoke).
+    starts = [s for s, _ in spans]
+    scene_durations = []
+    for i in range(len(spans)):
+        end = starts[i + 1] if i + 1 < len(spans) else total_dur
+        d = float(end - starts[i])   # plain float — np.float64 breaks json.dumps
+        if d < 1.2:
+            print(f"  [Voice] ⚠️  scene {i} very short ({d:.2f}s)")
+        scene_durations.append(d)
+
+    # ── SRT: subtitle leads its sentence by SRT_LEAD_SECONDS (display-side; no
+    # silence is inserted in the audio) and holds until the next one appears. ──
+    timings = []
+    for i, (w_start, w_end) in enumerate(spans):
+        t0 = max(0.0, w_start - SRT_LEAD_SECONDS)
+        if timings:
+            t0 = max(t0, timings[-1][1] / 1000 + 0.01)
+        t1 = starts[i + 1] - SRT_LEAD_SECONDS if i + 1 < len(spans) else total_dur
+        timings.append((int(t0 * 1000), int(max(t1, w_end) * 1000), texts[i]))
+    Path(srt_path).write_text("\n".join(_scene_srt(timings)), encoding="utf-8")
+
+    print(f"  [Voice] ✅ Passage mode: {total_dur:.1f}s, {len(texts)} scenes, "
+          f"aligned={'yes' if spans else 'no'}")
+    print(f"  [Voice] Per-scene durations: {[round(d, 1) for d in scene_durations]}")
+    return scene_durations
+
+
+# ── Per-scene generation (LEGACY fallback — fixed gaps, robotic pacing) ───────
 
 def _generate_kokoro_scenes(
     narrations: list[str], audio_path: str, srt_path: str
@@ -337,7 +557,13 @@ def generate_voice_scenes(
 
     print(f"  [Voice] Generating TTS for {len(narrations)} scenes")
 
-    # Try Kokoro (accurate, per-scene)
+    # Passage mode: whole narration in one synthesis → natural sentence flow
+    durations = _generate_passage_scenes(narrations, audio_path, srt_path)
+    if durations is not None:
+        return audio_path, srt_path, durations
+
+    # Legacy per-scene path (fixed gaps — robotic, but exact timing)
+    print("  [Voice] Passage mode unavailable — legacy per-scene synthesis")
     durations = _generate_kokoro_scenes(narrations, audio_path, srt_path)
     if durations is not None:
         return audio_path, srt_path, durations
