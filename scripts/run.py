@@ -58,6 +58,8 @@ def main() -> int:
     parser.add_argument("--pick", type=int, default=None, help="Alternative index to use (with --fix)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Assemble locally, skip YouTube upload")
+    parser.add_argument("--no-scout", action="store_true",
+                        help="Disable automatic Bilibili real-footage scouting (Mode 1)")
     # ── Mode 2: video-grounded pipeline ──────────────────────────────────────
     parser.add_argument("--from-video", metavar="URL", default=None,
                         help="Mode 2: URL of a Bilibili/YouTube video to analyse and base the script on. "
@@ -78,6 +80,10 @@ def main() -> int:
                         help="Comma-separated specific timestamps (e.g. '7:48,8:01,8:06'). "
                              "Downloads a 12s window around each point.")
     args = parser.parse_args()
+
+    if args.no_scout:
+        import os
+        os.environ["AUTO_SCOUT_FOOTAGE"] = "0"   # read by config.settings on import
 
     try:
         # ── Mode 2: video-grounded ────────────────────────────────────────────

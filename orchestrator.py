@@ -365,6 +365,19 @@ def _build_from_brief(vid: str, brief, dry_run: bool = False,
     search_queries = [s.stock_query() for s in brief.scenes]       # keywords for stock search
     match_descs    = [s.narration for s in brief.scenes]           # judge against the narration
     gen_prompts    = [s.generation_prompt() for s in brief.scenes] # rich prompts for AI gen
+
+    # Auto-scout real footage (Bilibili) when the user didn't supply a
+    # reference URL — real clips beat AI stills for authenticity. Any failure
+    # just means the competition runs with stock + AI as before.
+    from config.settings import AUTO_SCOUT_FOOTAGE
+    if reference_frames is None and AUTO_SCOUT_FOOTAGE:
+        try:
+            from agents.footage_scout import scout_footage
+            reference_frames = scout_footage(brief.topic, search_queries,
+                                             out_dir=out_dir) or None
+        except Exception as e:
+            print(f"  [Scout] error ({e}) — stock/AI only")
+
     media_items = download_media(vid, search_queries,
                                  match_descriptions=match_descs, gen_prompts=gen_prompts,
                                  reference_frames=reference_frames)

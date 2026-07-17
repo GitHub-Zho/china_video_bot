@@ -1,0 +1,17 @@
+{
+  "_comment": "Curated real-footage sources for the scout. preferred_uploaders: substring match on the Bilibili uploader name — a hit outranks everything else. Edit freely; add the exact uploader names of documentary channels you trust. boost/avoid keywords match title+tags.",
+  "preferred_uploaders": [
+    "央视",
+    "CCTV",
+    "央视频",
+    "央视网",
+    "哔哩哔哩纪录片",
+    "中国国家地理",
+    "二更",
+    "一条"
+  ],
+  "boost_keywords": ["纪录片", "纪录", "4K", "超清", "航拍", "美食纪录", "风味", "舌尖"],
+  "avoid_keywords": ["vlog", "开箱", "测评", "探店", "挑战", "整蛊", "吃播", "试吃"],
+  "search_suffix": "纪录片",
+  "min_views": 20000
+}

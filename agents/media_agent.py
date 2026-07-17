@@ -468,13 +468,22 @@ def compete_and_apply(video_id: str, scene_index: int, search_query: str,
         for g in generate_images_wanx(gp, 1, work):
             pool.append({"kind": "image", "preview": g, "img": g})
 
-        # Reference frames from a real video (B站/YouTube) — all frames enter
-        # every scene's pool; Qwen will pick the one that matches each narration best.
-        # Already-used frames are excluded so each real frame is used at most once.
-        for rf in (reference_frames or []):
+        # Reference frames from a real video (B站/YouTube). Already-used frames
+        # are excluded so each real frame is used at most once. Capped at 4 per
+        # scene: keeps the judge call small enough for weaker vision fallbacks
+        # (Groq splits >5-image requests, which degrades comparative picks).
+        refs = list(reference_frames or [])
+        if refs:
+            rot = (scene_index * 2) % len(refs)   # rotate so later scenes see later frames
+            refs = refs[rot:] + refs[:rot]
+        ref_added = 0
+        for rf in refs:
+            if ref_added >= 4:
+                break
             rf_path = Path(rf)
             if rf_path.exists() and str(rf_path) not in (used_ref_paths or set()):
                 pool.append({"kind": "reference", "preview": str(rf_path), "img": str(rf_path)})
+                ref_added += 1
 
         if not pool:
             return None

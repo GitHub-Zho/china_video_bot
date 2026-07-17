@@ -101,29 +101,44 @@ class VideoUnderstanding:
 
 # ── Download + ffprobe ────────────────────────────────────────────────────────
 
-def _download_video(url: str, out_path: str) -> bool:
+def _download_video(url: str, out_path: str, max_h: int = 480) -> bool:
     """
     Download via yt-dlp.  Bilibili returns 412 without cookies, so we try:
       1. Plain download (works for YouTube and non-restricted B站 content)
       2. --cookies-from-browser chrome  (fixes B站 412)
-      3. --cookies-from-browser safari  (macOS fallback)
+
+    max_h: resolution cap. 480 is plenty for frame ANALYSIS; the footage scout
+    passes 1080 because its clips go straight into the final video.
     """
     # Exclude AV1 (av01) — local FFmpeg often can't decode it for frame extraction.
-    # Prefer h264/h265 mp4 at ≤480p so ffmpeg -vf fps works reliably.
-    fmt = ("bestvideo[height<=480][ext=mp4][vcodec!^=av01]+bestaudio[ext=m4a]"
-           "/bestvideo[height<=480][vcodec^=avc]+bestaudio"
-           "/bestvideo[height<=480]+bestaudio/best[height<=480]/best")
+    # Prefer h264/h265 mp4; final fallbacks accept ANY non-AV1 split streams
+    # (some Bilibili videos offer nothing under the cap, and never offer combined
+    # formats, so a bare "best" would fail with "Requested format not available").
+    h = max_h
+    fmt = (f"bestvideo[height<={h}][ext=mp4][vcodec!^=av01]+bestaudio[ext=m4a]"
+           f"/bestvideo[height<={h}][vcodec^=avc]+bestaudio"
+           f"/bestvideo[height<={h}][vcodec!^=av01]+bestaudio"
+           f"/best[height<={h}][vcodec!^=av01]"
+           f"/bestvideo[height<={h * 2}][vcodec!^=av01]+bestaudio"
+           f"/bestvideo[vcodec!^=av01]+bestaudio")
+    from config.settings import FFMPEG_BIN as _ff
     base_cmd = [
         "yt-dlp", "--format", fmt,
         "--merge-output-format", "mp4",
+        # yt-dlp merges split streams with whatever `ffmpeg` is in PATH — point
+        # it at the known-good binary (a broken PATH ffmpeg leaves .fNNN
+        # fragments behind while still exiting 0).
+        "--ffmpeg-location", _ff,
         "--no-playlist", "--quiet", "--no-warnings",
         "-o", out_path, url,
     ]
 
-    # Try plain first, then with browser cookies (fixes Bilibili 412).
-    # Always try all three — don't short-circuit on unexpected error messages.
-    for extra in [[], ["--cookies-from-browser", "chrome"],
-                       ["--cookies-from-browser", "safari"]]:
+    # Bilibili serves >480p ONLY to logged-in sessions, so high-res requests
+    # must lead with browser cookies; plain-first is fine for analysis copies.
+    attempts = [[], ["--cookies-from-browser", "chrome"]]
+    if max_h > 480:
+        attempts.reverse()
+    for extra in attempts:
         label = extra[1] if extra else "plain"
         cmd = base_cmd[:1] + extra + base_cmd[1:]
         try:

@@ -68,6 +68,10 @@ SCENE_LEAD_IN     = 0.4       # subtitle appears, THEN narration starts (caption
 SCENE_TAIL        = 0.6       # silent beat after the line before the next scene
 MIN_SCENE_SECONDS = 3.2       # each scene holds at least this long (short lines still breathe)
 
+# Auto-scout: search Bilibili for real footage per topic and feed frame+clip
+# pairs into the media competition (Mode 1). Set AUTO_SCOUT_FOOTAGE=0 to disable.
+AUTO_SCOUT_FOOTAGE = os.getenv("AUTO_SCOUT_FOOTAGE", "1") != "0"
+
 # ── Voice (passage mode) ──────────────────────────────────────────────────────
 TTS_ENGINE   = os.getenv("TTS_ENGINE", "auto")   # auto | chatterbox | kokoro
 CHATTERBOX_EXAGGERATION = 0.45   # 0.5 = neutral; tuned once, then FIXED (no per-scene AI)
