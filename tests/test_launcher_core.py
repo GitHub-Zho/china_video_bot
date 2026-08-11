@@ -315,3 +315,31 @@ def test_closing_runner_stops_and_reaps_real_process(tmp_path: Path) -> None:
         __import__("os").kill(pid, 0)
     assert runner._lock.acquire(blocking=False)
     runner._lock.release()
+
+
+def test_quiet_process_yields_cancellable_heartbeat(tmp_path: Path) -> None:
+    pid_file = tmp_path / "quiet-child.pid"
+    script = (
+        "import os,time,pathlib; "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+        "time.sleep(2)"
+    )
+    runner = PipelineRunner(
+        tmp_path,
+        command_builder=lambda request, python: [python, "-c", script],
+    )
+    events = runner.run(LaunchRequest(mode="topic", prompt="Guilin"))
+
+    started = time.monotonic()
+    first = next(events)
+    elapsed = time.monotonic() - started
+    assert first == RunEvent("heartbeat", "")
+    assert elapsed < 0.6
+
+    events.close()
+
+    pid = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        __import__("os").kill(pid, 0)
+    assert runner._lock.acquire(blocking=False)
+    runner._lock.release()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -46,7 +47,7 @@ class RunOutputs:
 
 @dataclass(frozen=True)
 class RunEvent:
-    kind: Literal["log", "complete", "error"]
+    kind: Literal["log", "heartbeat", "complete", "error"]
     message: str
     outputs: tuple[RunOutputs, ...] | None = None
 
@@ -271,20 +272,51 @@ class PipelineRunner:
                 yield RunEvent("error", f"无法启动生成进程：{exc}")
                 return
 
+            process_events: queue.Queue[tuple[str, Any]] = queue.Queue()
+
+            def read_process_output() -> None:
+                try:
+                    for line in process.stdout or ():
+                        process_events.put(("line", line))
+                    process_events.put(("done", process.wait()))
+                except BaseException as exc:
+                    process_events.put(("reader_error", exc))
+
+            reader = threading.Thread(
+                target=read_process_output,
+                name="china-video-bot-log-reader",
+                daemon=True,
+            )
+            reader.start()
+
             result_paths: list[str] = []
+            returncode: int | None = None
             try:
-                for line in process.stdout or ():
-                    message = line.rstrip()
-                    marker_paths = extract_result_paths(message)
-                    if marker_paths:
-                        result_paths.extend(marker_paths)
-                    elif message:
-                        yield RunEvent("log", message)
+                while returncode is None:
+                    try:
+                        event_kind, payload = process_events.get(timeout=0.5)
+                    except queue.Empty:
+                        yield RunEvent("heartbeat", "")
+                        continue
+
+                    if event_kind == "line":
+                        message = str(payload).rstrip()
+                        marker_paths = extract_result_paths(message)
+                        if marker_paths:
+                            result_paths.extend(marker_paths)
+                        elif message:
+                            yield RunEvent("log", message)
+                    elif event_kind == "done":
+                        returncode = int(payload)
+                    else:
+                        self._stop_process_group(process)
+                        yield RunEvent("error", f"读取运行日志失败：{payload}")
+                        return
             except BaseException:
                 self._stop_process_group(process)
+                reader.join(timeout=6)
                 raise
 
-            returncode = process.wait()
             if returncode != 0:
                 yield RunEvent("error", f"生成失败（退出码 {returncode}）。")
                 return

@@ -123,6 +123,17 @@ def stream_run(
     yield "⏳ 正在生成…", "", None, None, None, None, ""
 
     for event in runner.run(request):
+        if event.kind == "heartbeat":
+            yield (
+                "⏳ 正在生成…",
+                "\n".join(logs),
+                None,
+                None,
+                None,
+                None,
+                "",
+            )
+            continue
         if event.kind == "log":
             logs.append(event.message)
             yield "⏳ 正在生成…", "\n".join(logs), None, None, None, None, ""
