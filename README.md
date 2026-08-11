@@ -7,6 +7,36 @@ Short-form China travel/culture content, ~25–60 s, fully automated.
 
 ---
 
+## Local browser launcher
+
+Use the local UI when you want to generate videos without typing CLI commands or opening Codex.
+It supports both topic-driven and video-grounded generation. The UI always uses `--dry-run` and
+cannot publish to YouTube or Instagram.
+
+First-time setup:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+Then double-click `scripts/start_ui.command` in Finder. It starts a local server and opens:
+
+```text
+http://127.0.0.1:7860/
+```
+
+Terminal fallback:
+
+```bash
+.venv/bin/python -m launcher.app
+```
+
+Mode 1 defaults to disabling automatic Scout until its outstanding relevance filters are fixed and
+verified. You can re-enable Scout from the page when you explicitly want to test it.
+
+---
+
 ## Two modes at a glance
 
 | | Mode 1 — Topic-driven | Mode 2 — Video-grounded |
