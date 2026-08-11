@@ -589,3 +589,120 @@ None.
 **Status:** ⏳ Monitor — no action taken yet
 
 ---
+
+## [24] 2026-06-11 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 1 issue(s):
+    ❌ [content] t=27.8s — Narration refers to 'real Peking duck' and 'labor of love' in the context of Beijing roast duck preparation, but the frame shows a rotisserie with pork or other meats (not duck) being roasted — this is a content mismatch as it does not depict authentic Peking duck roasting.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [25] 2026-06-11 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 1 issue(s):
+    ❌ [content] t=33.8s — Narration says 'There's history in every bite here' in context of Beijing roast duck, but frame shows a street food stall with skewers, fried snacks, and noodles — unrelated to Peking duck. Content mismatch.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [26] 2026-06-11 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 2 issue(s):
+    ❌ [visual] t=18.8s — Frame is completely black — likely a corrupted or missing frame, which disrupts the visual flow and content delivery.
+    ? [content] t=30.8s — Narration asks about finding the roast duck place, but the frame shows the Temple of Heaven (a tourist landmark), not the restaurant or any related food context — mismatch between narration and visual content.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [27] 2026-06-11 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 4 issue(s):
+    ❌ [content] t=6.8s — Narration mentions 'imperial palace food — perfected over 700 years' but the frame shows a gloved hand slicing meat in a street food setting, which lacks historical or imperial context and does not visually support the narration about tradition and history.
+    ❌ [visual] t=11.3s — Black screen with text only — no visual content to support the narration about the skin. This is a visual gap that breaks continuity and fails to illustrate the topic.
+    ? [visual] t=23.3s — Narration says 'slow-roast over fruitwood until the skin turns deep mahogany,' but the frame shows a market stall with various roasted meats (including chickens and ducks), not a close-up of roasting process over fruitwood. The visual does not clearly show the slow-roasting method described.
+    ? [visual] t=32.3s — Black screen with text only — no visual content to support the description of taste. This creates a visual break without supporting imagery.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
+
+## [28] 2026-06-11 · ANALYTICS — QA issues in youtube.mp4
+
+**Source:** qa_agent.qa_check() on youtube.mp4
+
+**Analysis:**
+Gemini Vision found 9 issue(s):
+    ❌ [content] t=8.3s — Narration says chefs train to make ONE cut, but the footage shows a chef slicing already cooked duck meat into thin pieces. This does not illustrate the skill of making a single, precise cut during preparation.
+    ❌ [content] t=9.8s — Narration says chefs train to make ONE cut, but the footage shows a chef slicing already cooked duck meat into thin pieces. This does not illustrate the skill of making a single, precise cut during preparation.
+    ❌ [content] t=14.3s — Narration says a master carves the whole duck into 100 thin slices, but the footage shows a chef slicing already cooked duck meat. It does not show the carving of a whole duck or the quantity of slices.
+    ❌ [content] t=17.3s — Narration says a master carves the whole duck into 100 thin slices, but the footage shows a chef slicing already cooked duck meat. It does not show the carving of a whole duck or the quantity of slices.
+    ❌ [content] t=18.8s — Narration mentions 'best duck in town' and shows a food stall with hanging ducks and chickens. However, the primary focus of the visual is on various roasted meats, not specifically Beijing Roast Duck preparation or presentation.
+    ❌ [content] t=20.3s — Narration mentions 'best duck in town' and shows a food stall with hanging ducks and chickens. However, the primary focus of the visual is on various roasted meats, not specifically Beijing Roast Duck preparation or presentation.
+    ❌ [content] t=21.8s — Narration mentions 'best duck in town' and shows a food stall with hanging ducks and chickens. However, the primary focus of the visual is on various roasted meats, not specifically Beijing Roast Duck preparation or presentation.
+    ❌ [content] t=30.8s — Narration asks to identify a 'hidden gem' and shows a roasting spit with whole ducks. While this is related to duck preparation, it doesn't specifically showcase Beijing Roast Duck preparation or the 'hidden gem' aspect implied by the narration. The visual is generic roasting.
+    ❌ [subtitle] t=30.8s — The text 'BEIJING ROAST DUCK' in the top left corner is partially obscured by a black bar.
+
+**Action taken:**
+Issues logged. Review and update guidelines if pattern repeats.
+
+**Expected effect:**
+If same issue appears in 3+ videos, add a rule to director_guidelines.json.
+
+**Conflicts with existing rules:**
+None.
+
+**Status:** ⏳ Monitor — no action taken yet
+
+---
