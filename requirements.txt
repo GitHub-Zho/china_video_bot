@@ -25,6 +25,9 @@ google-auth-oauthlib>=1.2.0
 apscheduler>=3.10.4
 python-dotenv>=1.0.0
 
+# Local browser launcher
+gradio>=6.0,<7.0
+
 # Optional: style learning from a YouTube URL
 # yt-dlp>=2024.0.0
 faster-whisper>=1.0     # word-level alignment for passage-mode voice timing

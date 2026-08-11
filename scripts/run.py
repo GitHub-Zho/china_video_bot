@@ -20,12 +20,20 @@ Other modes:
 Exit code 0 on success, 1 on failure.
 """
 import argparse
+import json
 import sys
 import traceback
 from pathlib import Path
 
 # Make the project root importable when run as `python scripts/run.py`
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from launcher.core import RESULT_MARKER
+
+
+def _emit_result_marker(result) -> None:
+    """Emit one machine-readable result line for local launchers."""
+    print(f"{RESULT_MARKER}{json.dumps(result, default=str, ensure_ascii=False)}")
 
 
 def main() -> int:
@@ -98,9 +106,12 @@ def main() -> int:
                 sample_interval=args.sample_interval,
             )
             if isinstance(result, dict):
+                _emit_result_marker(result)
                 for k, v in result.items():
                     print(f"   {k}: {v}")
                 return 0
+            if result:
+                _emit_result_marker(result)
             print(f"\n[run.py] ✅ Done: {result}")
             return 0 if result else 1
 
@@ -109,6 +120,8 @@ def main() -> int:
             from orchestrator import run_pipeline_from_brief
             result = run_pipeline_from_brief(args.from_brief, dry_run=args.dry_run,
                                              style=args.style)
+            if result:
+                _emit_result_marker(result)
             print(f"\n[run.py] ✅ Done: {result}")
             return 0 if result else 1
         # Fix mode — swap a scene's clip for a user-picked alternative, re-assemble.
@@ -175,11 +188,13 @@ def main() -> int:
             )
 
         if isinstance(result, dict):
+            _emit_result_marker(result)
             print("\n[run.py] ✅ Done:")
             for k, v in result.items():
                 print(f"   {k}: {v}")
             return 0
         if result:
+            _emit_result_marker(result)
             print(f"\n[run.py] ✅ Done: {result}")
             return 0
         print("\n[run.py] ⚠️  Pipeline returned no result")
