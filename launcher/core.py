@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import signal
 import subprocess
 import sys
 import threading
@@ -13,6 +16,7 @@ from urllib.parse import urlparse
 
 
 Mode = Literal["topic", "video"]
+RESULT_MARKER = "[run.py] RESULT_JSON "
 
 
 class LaunchValidationError(ValueError):
@@ -44,7 +48,7 @@ class RunOutputs:
 class RunEvent:
     kind: Literal["log", "complete", "error"]
     message: str
-    outputs: RunOutputs | None = None
+    outputs: tuple[RunOutputs, ...] | None = None
 
 
 def _number_arg(value: float) -> str:
@@ -110,11 +114,40 @@ def build_command(request: LaunchRequest, python_executable: str) -> list[str]:
     return command
 
 
-def discover_outputs(output_root: Path, started_at: float) -> RunOutputs:
-    """Return outputs from the newest run created or updated by this launch."""
+def extract_result_paths(line: str) -> tuple[str, ...]:
+    """Extract path-like string values from one machine-readable result line."""
+    if not line.startswith(RESULT_MARKER):
+        return ()
+    try:
+        payload = json.loads(line[len(RESULT_MARKER) :])
+    except json.JSONDecodeError:
+        return ()
+
+    paths: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, str):
+            paths.append(value)
+        elif isinstance(value, dict):
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(payload)
+    return tuple(paths)
+
+
+def discover_outputs(
+    output_root: Path,
+    started_at: float,
+    hinted_paths: list[str] | tuple[str, ...] | None = None,
+) -> tuple[RunOutputs, ...]:
+    """Resolve safe run artifacts, preferring paths emitted by this process."""
     root = output_root.resolve()
     if not root.is_dir():
-        return RunOutputs()
+        return ()
 
     artifact_names = ("youtube.mp4", "reels.mp4", "brief.json")
 
@@ -125,30 +158,54 @@ def discover_outputs(output_root: Path, started_at: float) -> RunOutputs:
             for name in artifact_names
         )
 
-    candidates = [
-        item
-        for item in root.iterdir()
-        if item.is_dir()
-        and item.stat().st_mtime >= started_at
-        and has_safe_artifact(item)
-    ]
+    if hinted_paths is not None:
+        candidates: list[Path] = []
+        seen: set[Path] = set()
+        for raw_path in hinted_paths:
+            candidate = Path(raw_path)
+            if not candidate.is_absolute():
+                candidate = root.parent / candidate
+            candidate = candidate.resolve()
+            directory = candidate if candidate.is_dir() else candidate.parent
+            if (
+                directory.is_relative_to(root)
+                and directory not in seen
+                and has_safe_artifact(directory)
+            ):
+                candidates.append(directory)
+                seen.add(directory)
+    else:
+        candidates = sorted(
+            (
+                item
+                for item in root.iterdir()
+                if item.is_dir()
+                and item.stat().st_mtime >= started_at
+                and has_safe_artifact(item)
+            ),
+            key=lambda item: (item.stat().st_mtime, item.name),
+            reverse=True,
+        )
     if not candidates:
-        return RunOutputs()
+        return ()
 
-    output_dir = max(candidates, key=lambda item: (item.stat().st_mtime, item.name)).resolve()
+    def run_outputs(output_dir: Path) -> RunOutputs:
+        output_dir = output_dir.resolve()
 
-    def safe_file(name: str) -> Path | None:
-        candidate = (output_dir / name).resolve()
-        if candidate.is_file() and candidate.is_relative_to(root):
-            return candidate
-        return None
+        def safe_file(name: str) -> Path | None:
+            candidate = (output_dir / name).resolve()
+            if candidate.is_file() and candidate.is_relative_to(root):
+                return candidate
+            return None
 
-    return RunOutputs(
-        output_dir=output_dir,
-        youtube=safe_file("youtube.mp4"),
-        reels=safe_file("reels.mp4"),
-        brief=safe_file("brief.json"),
-    )
+        return RunOutputs(
+            output_dir=output_dir,
+            youtube=safe_file("youtube.mp4"),
+            reels=safe_file("reels.mp4"),
+            brief=safe_file("brief.json"),
+        )
+
+    return tuple(run_outputs(directory) for directory in candidates)
 
 
 class PipelineRunner:
@@ -158,11 +215,30 @@ class PipelineRunner:
         self,
         repo_root: Path,
         popen: Callable[..., Any] = subprocess.Popen,
+        command_builder: Callable[[LaunchRequest, str], list[str]] = build_command,
     ) -> None:
         self.repo_root = repo_root.resolve()
         self.output_root = self.repo_root / "output"
         self._popen = popen
+        self._command_builder = command_builder
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _stop_process_group(process: Any) -> None:
+        """Terminate and reap the child plus FFmpeg/yt-dlp descendants."""
+        if process.poll() is not None:
+            process.wait()
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=5)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
 
     def run(self, request: LaunchRequest) -> Iterator[RunEvent]:
         if not self._lock.acquire(blocking=False):
@@ -170,14 +246,17 @@ class PipelineRunner:
             return
 
         started_at = time.time()
+        process: Any | None = None
         try:
             try:
-                command = build_command(request, sys.executable)
+                command = self._command_builder(request, sys.executable)
             except LaunchValidationError as exc:
                 yield RunEvent("error", str(exc))
                 return
 
             try:
+                child_env = os.environ.copy()
+                child_env["PYTHONUNBUFFERED"] = "1"
                 process = self._popen(
                     command,
                     cwd=self.repo_root,
@@ -185,22 +264,36 @@ class PipelineRunner:
                     stderr=subprocess.STDOUT,
                     text=True,
                     bufsize=1,
+                    env=child_env,
+                    start_new_session=True,
                 )
             except OSError as exc:
                 yield RunEvent("error", f"无法启动生成进程：{exc}")
                 return
 
-            for line in process.stdout or ():
-                message = line.rstrip()
-                if message:
-                    yield RunEvent("log", message)
+            result_paths: list[str] = []
+            try:
+                for line in process.stdout or ():
+                    message = line.rstrip()
+                    marker_paths = extract_result_paths(message)
+                    if marker_paths:
+                        result_paths.extend(marker_paths)
+                    elif message:
+                        yield RunEvent("log", message)
+            except BaseException:
+                self._stop_process_group(process)
+                raise
 
             returncode = process.wait()
             if returncode != 0:
                 yield RunEvent("error", f"生成失败（退出码 {returncode}）。")
                 return
 
-            outputs = discover_outputs(self.output_root, started_at)
+            outputs = discover_outputs(
+                self.output_root,
+                started_at,
+                hinted_paths=result_paths,
+            )
             yield RunEvent("complete", "生成完成。", outputs)
         finally:
             self._lock.release()

@@ -67,18 +67,21 @@ def request_from_form(
     )
 
 
-def _paths_text(outputs: RunOutputs | None) -> str:
+def _paths_text(outputs: tuple[RunOutputs, ...] | None) -> str:
     if not outputs:
         return ""
     lines: list[str] = []
-    if outputs.output_dir:
-        lines.append(f"输出目录：{outputs.output_dir}")
-    if outputs.brief:
-        lines.append(f"脚本文件：{outputs.brief}")
-    if outputs.youtube:
-        lines.append(f"YouTube：{outputs.youtube}")
-    if outputs.reels:
-        lines.append(f"Reels：{outputs.reels}")
+    for index, output in enumerate(outputs, start=1):
+        label = output.output_dir.name if output.output_dir else f"版本 {index}"
+        lines.append(f"[{label}]")
+        if output.output_dir:
+            lines.append(f"输出目录：{output.output_dir}")
+        if output.brief:
+            lines.append(f"脚本文件：{output.brief}")
+        if output.youtube:
+            lines.append(f"YouTube：{output.youtube}")
+        if output.reels:
+            lines.append(f"Reels：{output.reels}")
     return "\n".join(lines)
 
 
@@ -93,7 +96,17 @@ def stream_run(
     sample_interval: float | int,
     seconds: float | int | None,
     review: bool,
-) -> Iterator[tuple[str, str, str | None, str | None, str]]:
+) -> Iterator[
+    tuple[
+        str,
+        str,
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+        str,
+    ]
+]:
     """Run one request and stream display-ready updates to Gradio."""
     request = request_from_form(
         mode_label,
@@ -107,25 +120,27 @@ def stream_run(
         review,
     )
     logs: list[str] = []
-    yield "⏳ 正在生成…", "", None, None, ""
+    yield "⏳ 正在生成…", "", None, None, None, None, ""
 
     for event in runner.run(request):
         if event.kind == "log":
             logs.append(event.message)
-            yield "⏳ 正在生成…", "\n".join(logs), None, None, ""
+            yield "⏳ 正在生成…", "\n".join(logs), None, None, None, None, ""
             continue
         if event.kind == "error":
-            yield f"❌ {event.message}", "\n".join(logs), None, None, ""
+            yield f"❌ {event.message}", "\n".join(logs), None, None, None, None, ""
             continue
 
-        outputs = event.outputs or RunOutputs()
-        youtube = str(outputs.youtube) if outputs.youtube else None
-        reels = str(outputs.reels) if outputs.reels else None
+        outputs = event.outputs or ()
+        first = outputs[0] if outputs else RunOutputs()
+        second = outputs[1] if len(outputs) > 1 else RunOutputs()
         yield (
             f"✅ {event.message}",
             "\n".join(logs),
-            youtube,
-            reels,
+            str(first.youtube) if first.youtube else None,
+            str(first.reels) if first.reels else None,
+            str(second.youtube) if second.youtube else None,
+            str(second.reels) if second.reels else None,
             _paths_text(outputs),
         )
 
@@ -204,9 +219,14 @@ def create_app(runner: Runner | None = None) -> gr.Blocks:
             autoscroll=True,
         )
 
+        gr.Markdown("### 版本 1")
         with gr.Row():
-            youtube = gr.Video(label="YouTube 横版")
-            reels = gr.Video(label="Reels 竖版")
+            youtube = gr.Video(label="版本 1 · YouTube 横版")
+            reels = gr.Video(label="版本 1 · Reels 竖版")
+        gr.Markdown("### 版本 2（选择 both 时显示）")
+        with gr.Row():
+            youtube_second = gr.Video(label="版本 2 · YouTube 横版")
+            reels_second = gr.Video(label="版本 2 · Reels 竖版")
         paths = gr.Textbox(label="输出位置", lines=4, interactive=False)
 
         mode.change(
@@ -234,7 +254,15 @@ def create_app(runner: Runner | None = None) -> gr.Blocks:
                 seconds,
                 review,
             ],
-            outputs=[status, logs, youtube, reels, paths],
+            outputs=[
+                status,
+                logs,
+                youtube,
+                reels,
+                youtube_second,
+                reels_second,
+                paths,
+            ],
             concurrency_limit=1,
             concurrency_id="video-generation",
         )

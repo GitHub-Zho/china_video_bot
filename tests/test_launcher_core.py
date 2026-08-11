@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -9,8 +10,11 @@ from launcher.core import (
     LaunchRequest,
     LaunchValidationError,
     PipelineRunner,
+    RESULT_MARKER,
+    RunEvent,
     build_command,
     discover_outputs,
+    extract_result_paths,
 )
 
 
@@ -136,7 +140,8 @@ def test_discover_outputs_returns_newest_eligible_run(tmp_path: Path) -> None:
     older.touch()
     newer.touch()
 
-    result = discover_outputs(tmp_path, started_at=0)
+    results = discover_outputs(tmp_path, started_at=0)
+    result = results[0]
 
     assert result.output_dir == newer.resolve()
     assert result.youtube == youtube.resolve()
@@ -150,7 +155,8 @@ def test_discover_outputs_supports_review_only_brief(tmp_path: Path) -> None:
     brief = run / "brief.json"
     brief.touch()
 
-    result = discover_outputs(tmp_path, started_at=0)
+    results = discover_outputs(tmp_path, started_at=0)
+    result = results[0]
 
     assert result.output_dir == run.resolve()
     assert result.brief == brief.resolve()
@@ -168,7 +174,8 @@ def test_discover_outputs_ignores_newer_cache_directories(tmp_path: Path) -> Non
     (cache / "analysis.json").touch()
     cache.touch()
 
-    result = discover_outputs(tmp_path, started_at=0)
+    results = discover_outputs(tmp_path, started_at=0)
+    result = results[0]
 
     assert result.output_dir == run.resolve()
     assert result.youtube == youtube.resolve()
@@ -179,9 +186,49 @@ def test_discover_outputs_ignores_runs_older_than_start(tmp_path: Path) -> None:
     run.mkdir()
     (run / "youtube.mp4").touch()
 
-    result = discover_outputs(tmp_path, started_at=run.stat().st_mtime + 10)
+    results = discover_outputs(tmp_path, started_at=run.stat().st_mtime + 10)
 
-    assert result.output_dir is None
+    assert results == ()
+
+
+def test_extract_result_paths_reads_nested_machine_marker() -> None:
+    line = (
+        RESULT_MARKER
+        + '{"growth": "output/growth/youtube.mp4", '
+        + '"info": {"result": "output/info/brief.json"}}'
+    )
+
+    assert extract_result_paths(line) == (
+        "output/growth/youtube.mp4",
+        "output/info/brief.json",
+    )
+
+
+def test_discover_outputs_uses_only_hinted_run_directories(tmp_path: Path) -> None:
+    growth = tmp_path / "growth"
+    growth.mkdir()
+    growth_youtube = growth / "youtube.mp4"
+    growth_reels = growth / "reels.mp4"
+    growth_youtube.touch()
+    growth_reels.touch()
+    info = tmp_path / "info"
+    info.mkdir()
+    info_brief = info / "brief.json"
+    info_brief.touch()
+    unrelated = tmp_path / "other_run"
+    unrelated.mkdir()
+    (unrelated / "youtube.mp4").touch()
+
+    results = discover_outputs(
+        tmp_path,
+        started_at=0,
+        hinted_paths=[str(growth_youtube), str(info_brief)],
+    )
+
+    assert [result.output_dir for result in results] == [growth.resolve(), info.resolve()]
+    assert results[0].youtube == growth_youtube.resolve()
+    assert results[0].reels == growth_reels.resolve()
+    assert results[1].brief == info_brief.resolve()
 
 
 def test_runner_streams_logs_and_completion(tmp_path: Path) -> None:
@@ -227,3 +274,44 @@ def test_runner_reports_validation_without_starting_process(tmp_path: Path) -> N
 
     assert events[-1].kind == "error"
     assert events[-1].message == "请输入主题"
+
+
+def test_runner_streams_real_python_output_before_process_exit(tmp_path: Path) -> None:
+    script = "import time; print('first'); time.sleep(1.0); print('second')"
+    runner = PipelineRunner(
+        tmp_path,
+        command_builder=lambda request, python: [python, "-c", script],
+    )
+
+    started = time.monotonic()
+    events = runner.run(LaunchRequest(mode="topic", prompt="Guilin"))
+    first = next(events)
+    elapsed = time.monotonic() - started
+    remaining = list(events)
+
+    assert first == RunEvent("log", "first")
+    assert elapsed < 0.6
+    assert any(event.message == "second" for event in remaining)
+
+
+def test_closing_runner_stops_and_reaps_real_process(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.pid"
+    script = (
+        "import os,time,pathlib; "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+        "print('ready'); time.sleep(60)"
+    )
+    runner = PipelineRunner(
+        tmp_path,
+        command_builder=lambda request, python: [python, "-c", script],
+    )
+    events = runner.run(LaunchRequest(mode="topic", prompt="Guilin"))
+
+    assert next(events) == RunEvent("log", "ready")
+    events.close()
+
+    pid = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        __import__("os").kill(pid, 0)
+    assert runner._lock.acquire(blocking=False)
+    runner._lock.release()

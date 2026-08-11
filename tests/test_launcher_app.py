@@ -64,9 +64,16 @@ def test_video_form_maps_to_reference_request() -> None:
 
 
 def test_stream_run_accumulates_logs_and_exposes_outputs(tmp_path: Path) -> None:
-    youtube = tmp_path / "youtube.mp4"
-    reels = tmp_path / "reels.mp4"
-    outputs = RunOutputs(output_dir=tmp_path, youtube=youtube, reels=reels)
+    growth_dir = tmp_path / "demo_growth"
+    info_dir = tmp_path / "demo_info"
+    youtube = growth_dir / "youtube.mp4"
+    reels = growth_dir / "reels.mp4"
+    info_youtube = info_dir / "youtube.mp4"
+    info_reels = info_dir / "reels.mp4"
+    outputs = (
+        RunOutputs(output_dir=growth_dir, youtube=youtube, reels=reels),
+        RunOutputs(output_dir=info_dir, youtube=info_youtube, reels=info_reels),
+    )
     runner = StubRunner(
         [
             RunEvent("log", "first"),
@@ -95,7 +102,10 @@ def test_stream_run_accumulates_logs_and_exposes_outputs(tmp_path: Path) -> None
     assert updates[-1][0] == "✅ 生成完成。"
     assert updates[-1][2] == str(youtube)
     assert updates[-1][3] == str(reels)
-    assert str(tmp_path) in updates[-1][4]
+    assert updates[-1][4] == str(info_youtube)
+    assert updates[-1][5] == str(info_reels)
+    assert str(growth_dir) in updates[-1][6]
+    assert str(info_dir) in updates[-1][6]
 
 
 def test_create_app_contains_local_generation_controls() -> None:
