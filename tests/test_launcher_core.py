@@ -98,11 +98,19 @@ def test_mode2_command_uses_reference_url() -> None:
             LaunchRequest(mode="video", video_url="https://example.com/v", topic=""),
             "请输入主题说明",
         ),
+        (
+            LaunchRequest(mode="video", video_url="not-a-url", topic="Duck"),
+            "仅支持 Bilibili 或 YouTube 视频网址",
+        ),
+        (
+            LaunchRequest(mode="video", video_url="https://example.com/video", topic="Duck"),
+            "仅支持 Bilibili 或 YouTube 视频网址",
+        ),
         (LaunchRequest(mode="topic", prompt="Duck", seconds=0), "目标时长必须大于 0"),
         (
             LaunchRequest(
                 mode="video",
-                video_url="https://example.com/v",
+                video_url="https://www.bilibili.com/video/BV1x",
                 topic="Duck",
                 sample_interval=0,
             ),

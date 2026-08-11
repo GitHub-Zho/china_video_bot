@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
+from urllib.parse import urlparse
 
 
 Mode = Literal["topic", "video"]
@@ -50,6 +51,17 @@ def _number_arg(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else str(value)
 
 
+def _is_supported_video_url(value: str) -> bool:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    hostname = parsed.hostname.lower()
+    return hostname == "b23.tv" or any(
+        hostname == domain or hostname.endswith(f".{domain}")
+        for domain in ("bilibili.com", "youtube.com", "youtu.be")
+    )
+
+
 def build_command(request: LaunchRequest, python_executable: str) -> list[str]:
     """Build an argument-list command that can never publish content."""
     command = [python_executable, "scripts/run.py", "--dry-run"]
@@ -74,6 +86,8 @@ def build_command(request: LaunchRequest, python_executable: str) -> list[str]:
             raise LaunchValidationError("请输入参考视频网址")
         if not topic:
             raise LaunchValidationError("请输入主题说明")
+        if not _is_supported_video_url(video_url):
+            raise LaunchValidationError("仅支持 Bilibili 或 YouTube 视频网址")
         if request.sample_interval <= 0:
             raise LaunchValidationError("采样间隔必须大于 0")
         command.extend(
