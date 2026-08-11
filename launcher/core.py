@@ -116,10 +116,21 @@ def discover_outputs(output_root: Path, started_at: float) -> RunOutputs:
     if not root.is_dir():
         return RunOutputs()
 
+    artifact_names = ("youtube.mp4", "reels.mp4", "brief.json")
+
+    def has_safe_artifact(directory: Path) -> bool:
+        return any(
+            (directory / name).is_file()
+            and (directory / name).resolve().is_relative_to(root)
+            for name in artifact_names
+        )
+
     candidates = [
         item
         for item in root.iterdir()
-        if item.is_dir() and item.stat().st_mtime >= started_at
+        if item.is_dir()
+        and item.stat().st_mtime >= started_at
+        and has_safe_artifact(item)
     ]
     if not candidates:
         return RunOutputs()

@@ -158,6 +158,22 @@ def test_discover_outputs_supports_review_only_brief(tmp_path: Path) -> None:
     assert result.reels is None
 
 
+def test_discover_outputs_ignores_newer_cache_directories(tmp_path: Path) -> None:
+    run = tmp_path / "20260811_run"
+    run.mkdir()
+    youtube = run / "youtube.mp4"
+    youtube.touch()
+    cache = tmp_path / "video_cache"
+    cache.mkdir()
+    (cache / "analysis.json").touch()
+    cache.touch()
+
+    result = discover_outputs(tmp_path, started_at=0)
+
+    assert result.output_dir == run.resolve()
+    assert result.youtube == youtube.resolve()
+
+
 def test_discover_outputs_ignores_runs_older_than_start(tmp_path: Path) -> None:
     run = tmp_path / "old"
     run.mkdir()
