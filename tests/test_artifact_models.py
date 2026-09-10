@@ -138,6 +138,16 @@ def test_file_content_ref_rejects_parent_traversal(path):
         ContentRef.file(path, "application/json", 2, checksum())
 
 
+@pytest.mark.parametrize(
+    "path",
+    [r"C:\\repo\\result.json", r"\\\\server\\share\\result.json", r"..\\result.json", r"safe\\..\\result.json"],
+)
+def test_file_content_ref_rejects_nonportable_absolute_or_traversal_paths(path):
+    """Catch Windows path forms that POSIX pathlib would otherwise serialize unchanged."""
+    with pytest.raises(ValueError, match="path"):
+        ContentRef.file(path, "application/json", 2, checksum())
+
+
 def test_content_ref_requires_only_the_identifier_for_its_storage_mode():
     """Catch file/blob references that are ambiguous about where bytes are stored."""
     with pytest.raises(ValueError, match="path"):

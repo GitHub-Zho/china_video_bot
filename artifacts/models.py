@@ -7,7 +7,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -241,10 +241,19 @@ class ContentRef:
     def _validate_relative_path(value: object) -> str:
         if not isinstance(value, (str, Path)):
             raise ValueError("path must be a relative path")
-        if isinstance(value, str) and not value.strip():
+        serialized_path = str(value)
+        if not serialized_path.strip():
             raise ValueError("path must be a concrete relative path")
-        path = Path(value)
-        if path == Path(".") or path.is_absolute():
+        if "\\" in serialized_path:
+            raise ValueError("path must use portable POSIX separators")
+        path = PurePosixPath(serialized_path)
+        windows_path = PureWindowsPath(serialized_path)
+        if (
+            path == PurePosixPath(".")
+            or path.is_absolute()
+            or windows_path.is_absolute()
+            or windows_path.drive
+        ):
             raise ValueError("path must be relative")
         if ".." in path.parts:
             raise ValueError("path must not contain ..")
