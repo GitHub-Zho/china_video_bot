@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import tempfile
 from dataclasses import dataclass
@@ -49,6 +50,7 @@ class FileContentStore:
     """Persist exact bytes below one dedicated, local storage root."""
 
     _BLOB_PREFIX = "blob_sha256_"
+    _FILE_MANIFEST_NAME = ".content-store-files.json"
 
     def __init__(self, storage_root: Path | str) -> None:
         self.root = Path(storage_root).expanduser().resolve()
@@ -83,6 +85,8 @@ class FileContentStore:
             destination = self._blob_path(checksum.value)
 
         self._atomic_write(destination, data)
+        if storage is StorageMode.FILE:
+            self._record_managed_file_path(content_ref.path)
         return content_ref
 
     def resolve(self, content_ref: ContentRef) -> Path:
@@ -90,29 +94,93 @@ class FileContentStore:
         if not isinstance(content_ref, ContentRef):
             raise ValueError("content_ref must be a ContentRef")
 
-        if content_ref.storage is StorageMode.FILE:
-            path = self._path_for_relative(content_ref.path)
-        else:
-            expected_blob_id = f"{self._BLOB_PREFIX}{content_ref.checksum.value}"
-            if content_ref.blob_id != expected_blob_id:
-                raise ContentIntegrityError("blob identifier does not match checksum")
-            path = self._blob_path(content_ref.checksum.value)
+        try:
+            if content_ref.storage is StorageMode.FILE:
+                path = self._path_for_relative(content_ref.path)
+            else:
+                expected_blob_id = f"{self._BLOB_PREFIX}{content_ref.checksum.value}"
+                if content_ref.blob_id != expected_blob_id:
+                    raise ContentIntegrityError("blob identifier does not match checksum")
+                path = self._blob_path(content_ref.checksum.value)
+        except ValueError as error:
+            raise ContentIntegrityError("managed content escapes storage root") from error
 
         self._verify(path, content_ref)
         return path
 
     def list_managed_content(self) -> list[GcCandidate]:
         """List regular content files as portable paths relative to ``storage_root``."""
-        candidates: list[GcCandidate] = []
-        for path in self.root.rglob("*"):
-            if path.is_symlink() or not path.is_file() or path.name.endswith(".tmp"):
-                continue
-            relative = path.relative_to(self.root).as_posix()
-            candidates.append(GcCandidate(relative, path.stat().st_size))
-        return sorted(candidates, key=lambda candidate: candidate.path)
+        candidates = {
+            candidate.path: candidate
+            for candidate in self._managed_file_candidates() + self._blob_candidates()
+        }
+        return sorted(candidates.values(), key=lambda candidate: candidate.path)
 
     def _blob_path(self, digest: str) -> Path:
         return self._path_for_relative(f"blobs/sha256/{digest[:2]}/{digest}")
+
+    def _file_manifest_path(self) -> Path:
+        return self.root / self._FILE_MANIFEST_NAME
+
+    def _record_managed_file_path(self, path: str | None) -> None:
+        if path is None:
+            raise ValueError("path must be relative")
+        paths = self._read_managed_file_paths()
+        paths.add(path)
+        manifest = json.dumps({"paths": sorted(paths)}, separators=(",", ":")).encode("utf-8")
+        self._atomic_write(self._file_manifest_path(), manifest)
+
+    def _read_managed_file_paths(self) -> set[str]:
+        manifest_path = self._file_manifest_path()
+        if not manifest_path.is_file() or manifest_path.is_symlink():
+            return set()
+        try:
+            value = json.loads(manifest_path.read_text(encoding="utf-8"))
+            paths = value["paths"]
+            if not isinstance(paths, list):
+                return set()
+            return {ContentRef._validate_relative_path(path) for path in paths}
+        except (OSError, TypeError, ValueError, json.JSONDecodeError, KeyError):
+            return set()
+
+    def _managed_file_candidates(self) -> list[GcCandidate]:
+        candidates: list[GcCandidate] = []
+        for relative_path in self._read_managed_file_paths():
+            try:
+                path = self._path_for_relative(relative_path)
+            except ValueError:
+                continue
+            if path.is_symlink() or not path.is_file():
+                continue
+            candidates.append(GcCandidate(relative_path, path.stat().st_size))
+        return candidates
+
+    def _blob_candidates(self) -> list[GcCandidate]:
+        candidates: list[GcCandidate] = []
+        blob_root = self.root / "blobs" / "sha256"
+        if not blob_root.is_dir() or blob_root.is_symlink():
+            return candidates
+        for path in blob_root.rglob("*"):
+            if path.is_symlink() or not path.is_file():
+                continue
+            relative_path = path.relative_to(self.root).as_posix()
+            if not self._is_blob_content_path(relative_path):
+                continue
+            candidates.append(GcCandidate(relative_path, path.stat().st_size))
+        return candidates
+
+    @staticmethod
+    def _is_blob_content_path(relative_path: str) -> bool:
+        parts = PurePosixPath(relative_path).parts
+        if len(parts) != 4 or parts[:2] != ("blobs", "sha256"):
+            return False
+        prefix, digest = parts[2:]
+        return (
+            len(prefix) == 2
+            and len(digest) == 64
+            and all(character in "0123456789abcdef" for character in digest)
+            and digest.startswith(prefix)
+        )
 
     def _path_for_relative(self, relative_path: str | Path | None) -> Path:
         if relative_path is None:

@@ -111,3 +111,43 @@ def test_list_managed_content_returns_root_relative_paths_and_sizes(tmp_path):
         (file_ref.path, 4),
         (f"blobs/sha256/{blob_ref.checksum.value[:2]}/{blob_ref.checksum.value}", 4),
     }
+
+
+def test_list_managed_content_excludes_unrelated_root_files_but_keeps_valid_tmp_content(tmp_path):
+    """Catch GC enumeration that claims non-content files or hides valid `.tmp` content."""
+    store = FileContentStore(tmp_path)
+    content_ref = store.persist(
+        b"content", StorageMode.FILE, "text/plain", Path("files/result.tmp")
+    )
+    (tmp_path / "repository-index.json").write_text("not managed")
+    (tmp_path / ".content-interrupted.tmp").write_bytes(b"partial")
+
+    candidates = store.list_managed_content()
+
+    assert [(candidate.path, candidate.size_bytes) for candidate in candidates] == [
+        (content_ref.path, 7)
+    ]
+
+
+def test_resolve_detects_a_same_size_checksum_mismatch(tmp_path):
+    """Catch integrity checks that only compare byte counts."""
+    store = FileContentStore(tmp_path)
+    ref = store.persist(b"original", StorageMode.FILE, "application/json", Path("one.json"))
+    store.resolve(ref).write_bytes(b"tampered")
+
+    with pytest.raises(ContentIntegrityError, match="checksum"):
+        store.resolve(ref)
+
+
+def test_resolve_classifies_an_outward_pointing_symlink_as_content_tampering(tmp_path):
+    """Catch symlink replacement escaping storage root as a validation error instead of tampering."""
+    store = FileContentStore(tmp_path)
+    ref = store.persist(b"original", StorageMode.FILE, "application/json", Path("one.json"))
+    stored_path = store.resolve(ref)
+    external_path = tmp_path.parent / "external.json"
+    external_path.write_bytes(b"external")
+    stored_path.unlink()
+    stored_path.symlink_to(external_path)
+
+    with pytest.raises(ContentIntegrityError):
+        store.resolve(ref)
