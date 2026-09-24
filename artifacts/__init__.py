@@ -15,18 +15,30 @@ from .models import (
     StorageMode,
     normalize_variant_key,
 )
+from .repository import (
+    ArtifactConflictError,
+    ArtifactNotFoundError,
+    ArtifactRepository,
+    GarbageCollectionReport,
+    PurgeBlockedError,
+)
 
 __all__ = [
     "ArtifactFamily",
+    "ArtifactConflictError",
     "ArtifactInputRef",
+    "ArtifactNotFoundError",
     "ArtifactOwner",
     "ArtifactProducer",
     "ArtifactRevision",
+    "ArtifactRepository",
     "Checksum",
     "ContentRef",
     "InputRefKind",
+    "GarbageCollectionReport",
     "OwnerKind",
     "ProducerKind",
+    "PurgeBlockedError",
     "StorageMode",
     "WorkingDraft",
     "normalize_variant_key",
