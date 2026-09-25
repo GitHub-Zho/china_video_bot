@@ -19,6 +19,8 @@ from .models import (
     ArtifactBinding,
     InputBinding,
     ProjectRuntimeV1,
+    RuntimeRef,
+    RuntimeRefKind,
     TaskAttemptV1,
     TaskOperation,
     TaskStatus,
@@ -73,6 +75,30 @@ OutputValue = ArtifactOutputSpec | Sequence[ArtifactOutputSpec] | None
 OutputAdapter = Callable[[Any, RuntimeExecutionContext], Mapping[str, OutputValue]]
 
 
+def adapt_video_analysis_executor(
+    analyzer: Callable[[str, str], Any],
+    *,
+    asset_resolver: Callable[[str], str],
+    topic_resolver: Callable[[str], str],
+    source_role: str = "primary_video",
+    topic_slot: str = "topic",
+) -> Callable[[RuntimeExecutionContext], Any]:
+    """Adapt the existing analyzer using only exact Runtime-bound IDs."""
+    if not callable(analyzer) or not callable(asset_resolver) or not callable(topic_resolver):
+        raise ValueError("analyzer and resolvers must be callable")
+
+    def execute(context: RuntimeExecutionContext) -> Any:
+        source = context.input_bindings.get(source_role)
+        topic = context.input_bindings.get(topic_slot)
+        if not isinstance(source, RuntimeRef) or source.kind is not RuntimeRefKind.ASSET:
+            raise ValueError(f"{source_role} must resolve to one Asset")
+        if not isinstance(topic, RuntimeRef) or topic.kind is not RuntimeRefKind.ARTIFACT:
+            raise ValueError(f"{topic_slot} must resolve to one Artifact")
+        return analyzer(asset_resolver(source.id), topic_resolver(topic.id))
+
+    return execute
+
+
 class WorkflowRuntime:
     """Execute or reuse one Stage without replacing the legacy one-shot pipeline."""
 
@@ -102,8 +128,6 @@ class WorkflowRuntime:
         stage_id: str,
         *,
         output_adapter: OutputAdapter,
-        executor_args: tuple[Any, ...] = (),
-        executor_kwargs: Mapping[str, Any] | None = None,
     ) -> TaskAttemptV1:
         view = self.states.get_view(project_id, stage_id)
         if not view.runnable:
@@ -128,9 +152,7 @@ class WorkflowRuntime:
             input_bindings=inputs,
         )
         try:
-            result = self.executors.execute(
-                stage.executor, *executor_args, **dict(executor_kwargs or {})
-            )
+            result = self.executors.execute(stage.executor, context)
             current = self.repository.get_task_attempt(task.task_id)
             if current.cancel_requested_at is not None:
                 return self.tasks.cancel(task.task_id)
@@ -300,14 +322,7 @@ class WorkflowRuntime:
     def _set_initial_active(
         self, project_id: str, stage_id: str, outputs: Mapping[str, ArtifactBinding]
     ) -> None:
-        project = self.repository.get_project(project_id)
-        existing = project.artifact_bindings.stage_outputs.get(stage_id, {})
-        for slot_name, binding in outputs.items():
-            if slot_name not in existing and artifact_ids(binding):
-                project = self.projects.set_active(
-                    project_id, stage_id, slot_name, binding
-                )
-                existing = project.artifact_bindings.stage_outputs.get(stage_id, {})
+        self.projects.set_initial_active_outputs(project_id, stage_id, outputs)
 
     @staticmethod
     def _stage(workflow, stage_id):
@@ -315,4 +330,3 @@ class WorkflowRuntime:
             if stage.stage_id == stage_id:
                 return stage
         raise ValueError(f"unknown Stage: {stage_id}")
-

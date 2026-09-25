@@ -140,4 +140,3 @@ class BindingResolver:
             if stage.stage_id == stage_id:
                 return stage
         raise BindingResolutionError(f"unknown Stage: {stage_id}")
-

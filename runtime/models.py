@@ -624,4 +624,3 @@ class StageView:
     runnable: bool
     blocked_by: tuple[str, ...]
     latest_attempt_status: str | None
-

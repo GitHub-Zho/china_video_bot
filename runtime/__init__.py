@@ -6,6 +6,7 @@ from .execution import (
     RuntimeExecutionContext,
     StageNotRunnableError,
     WorkflowRuntime,
+    adapt_video_analysis_executor,
 )
 from .models import (
     ApprovalSnapshot,
@@ -71,5 +72,5 @@ __all__ = [
     "WorkflowNotFoundError",
     "WorkflowPin",
     "WorkflowRuntime",
+    "adapt_video_analysis_executor",
 ]
-

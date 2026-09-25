@@ -19,6 +19,7 @@ from runtime import (
     ProjectService,
     RuntimeArtifactReferenceChecker,
     RuntimeRepository,
+    RuntimeConflictError,
     StageFreshness,
     StageReview,
     StageStateResolver,
@@ -26,6 +27,7 @@ from runtime import (
     TaskStatus,
     WorkflowCatalog,
     WorkflowRuntime,
+    adapt_video_analysis_executor,
 )
 from workflow import (
     ArtifactSlotDefinition,
@@ -133,6 +135,12 @@ def test_project_reopen_keeps_pinned_workflow_and_exact_state(runtime_stack) -> 
     assert reopened.stage_runs == project.stage_runs
     assert projects.workflow_for(reopened).workflow_version == "1"
 
+    archived = projects.archive_project(project.project_id)
+    assert archived.lifecycle_status.value == "archived"
+    restored = projects.restore_project(project.project_id)
+    assert restored.lifecycle_status.value == "active"
+    assert restored.deleted_at is None
+
 
 def test_active_approval_and_freshness_are_separate_and_reversible(runtime_stack) -> None:
     """Catch save/preferred/active/approval collapse and irreversible dirty flags."""
@@ -228,9 +236,12 @@ def test_runtime_references_block_purge_and_project_delete_keeps_source_artifact
     with pytest.raises(PurgeBlockedError, match="external reference"):
         artifacts.purge_revision(understanding.artifact_id)
 
+    artifacts.restore_revision(understanding.artifact_id)
     projects.delete_project(project.project_id)
     retained = artifacts.get_revision(understanding.artifact_id)
+    assert retained.deleted_at is None
     assert retained.purged_at is None
+    assert artifacts.resolve_content(understanding.artifact_id).is_file()
 
 
 def test_runtime_executes_existing_adapter_without_replacing_active_and_can_reuse(
@@ -240,24 +251,72 @@ def test_runtime_executes_existing_adapter_without_replacing_active_and_can_reus
     repository, artifacts, catalog, projects = runtime_stack
     calls = []
 
-    def analyzer(url, topic, sample_interval=4.0):
-        calls.append((url, topic, sample_interval))
+    asset_urls = {"asset_video_1": "https://example.invalid/video"}
+
+    def legacy_analyzer(url, topic, sample_interval=4.0):
+        call = (url, topic, sample_interval)
+        calls.append(call)
         return {"summary": topic, "url": url}
 
+    def resolve_topic(artifact_id):
+        topic_payload = json.loads(
+            artifacts.resolve_content(artifact_id).read_text(encoding="utf-8")
+        )
+        return topic_payload["topic"]
+
     registry = ExecutorRegistry()
-    register_existing_executors(registry, analyzer=analyzer)
+    register_existing_executors(
+        registry,
+        analyzer=adapt_video_analysis_executor(
+            legacy_analyzer,
+            asset_resolver=asset_urls.__getitem__,
+            topic_resolver=resolve_topic,
+        ),
+    )
     registry.register("test.plan", lambda: None)
     registry.register("test.timeline", lambda: None)
     tasks = LocalTaskManager(repository)
     runtime = WorkflowRuntime(
         repository, catalog, artifacts, registry, projects=projects, tasks=tasks
     )
+    exact_workflow = WorkflowDefinition(
+        "video_grounded.exact-inputs",
+        "1",
+        "video_grounded",
+        (
+            StageDefinition(
+                "analyze_source",
+                "analyze",
+                "video_grounded.analyze_source",
+                inputs={
+                    "topic": ArtifactSlotDefinition(
+                        "analysis_prompt", Cardinality.ONE
+                    )
+                },
+                outputs={
+                    "understanding": ArtifactSlotDefinition(
+                        "video_understanding", Cardinality.ONE
+                    )
+                },
+                approval_required=True,
+            ),
+        ),
+    )
+    catalog.register(exact_workflow)
     project = projects.create_project(
         "Execution",
-        workflow_id="video_grounded.default",
+        workflow_id=exact_workflow.workflow_id,
         workflow_version="1",
         source_bindings={"primary_video": "asset_video_1"},
     )
+    first_topic = _save_artifact(
+        artifacts,
+        owner=ArtifactOwner.project(project.project_id),
+        artifact_type="analysis_prompt",
+        payload={"topic": "first"},
+        input_refs=(),
+    )
+    projects.set_project_input(project.project_id, "topic", first_topic.artifact_id)
 
     def output_adapter(result, context):
         return {
@@ -272,16 +331,22 @@ def test_runtime_executes_existing_adapter_without_replacing_active_and_can_reus
     first = runtime.execute_stage(
         project.project_id,
         "analyze_source",
-        executor_args=("https://example.invalid/video", "first"),
         output_adapter=output_adapter,
     )
     first_id = first.output_bindings["understanding"]
     projects.approve_stage(project.project_id, "analyze_source")
 
+    second_topic = _save_artifact(
+        artifacts,
+        owner=ArtifactOwner.project(project.project_id),
+        artifact_type="analysis_prompt",
+        payload={"topic": "second"},
+        input_refs=(),
+    )
+    projects.set_project_input(project.project_id, "topic", second_topic.artifact_id)
     second = runtime.execute_stage(
         project.project_id,
         "analyze_source",
-        executor_args=("https://example.invalid/video", "second"),
         output_adapter=output_adapter,
     )
     assert second.status is TaskStatus.SUCCEEDED
@@ -298,10 +363,11 @@ def test_runtime_executes_existing_adapter_without_replacing_active_and_can_reus
 
     other = projects.create_project(
         "Reuse",
-        workflow_id="video_grounded.default",
+        workflow_id=exact_workflow.workflow_id,
         workflow_version="1",
         source_bindings={"primary_video": "asset_video_1"},
     )
+    projects.set_project_input(other.project_id, "topic", first_topic.artifact_id)
     before = len(artifacts.list_revisions(artifacts.get_revision(first_id).family_id))
     reused = runtime.reuse_stage_outputs(
         other.project_id, "analyze_source", {"understanding": first_id}
@@ -370,3 +436,50 @@ def test_binding_resolution_rejects_ambiguous_upstream_slots(runtime_stack) -> N
         StageStateResolver(repository, catalog, artifacts).bindings.resolve_stage_inputs(
             projects.get_project(project.project_id), ambiguous, "join"
         )
+
+
+def test_incomplete_required_outputs_are_stale_and_cannot_be_approved(
+    runtime_stack,
+) -> None:
+    """Catch partial Active output snapshots being treated as complete."""
+    repository, artifacts, catalog, projects = runtime_stack
+    workflow = WorkflowDefinition(
+        "multi_output.default",
+        "1",
+        "test",
+        (
+            StageDefinition(
+                "analyze",
+                "analyze",
+                "test.multi",
+                outputs={
+                    "left": ArtifactSlotDefinition("summary", Cardinality.ONE),
+                    "right": ArtifactSlotDefinition("summary", Cardinality.ONE),
+                },
+                approval_required=True,
+            ),
+        ),
+    )
+    catalog.register(workflow)
+    project = projects.create_project(
+        "Partial outputs",
+        workflow_id=workflow.workflow_id,
+        workflow_version=workflow.workflow_version,
+        source_bindings={"source": "asset_1"},
+    )
+    left = _save_artifact(
+        artifacts,
+        owner=ArtifactOwner.project(project.project_id),
+        artifact_type="summary",
+        payload={"side": "left"},
+        input_refs=(ArtifactInputRef("source", InputRefKind.ASSET, "asset_1"),),
+    )
+    projects.set_active(project.project_id, "analyze", "left", left.artifact_id)
+
+    view = StageStateResolver(repository, catalog, artifacts).get_view(
+        project.project_id, "analyze"
+    )
+    assert view.freshness is StageFreshness.STALE
+    assert view.review is StageReview.NEEDS_REVIEW
+    with pytest.raises(RuntimeConflictError, match="required output"):
+        projects.approve_stage(project.project_id, "analyze")

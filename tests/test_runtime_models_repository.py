@@ -14,6 +14,7 @@ from runtime.models import (
     WorkflowPin,
 )
 from runtime.repository import RuntimeRepository
+from runtime.repository import RuntimeConflictError, now_utc
 from runtime.tasks import LocalTaskManager
 
 
@@ -109,3 +110,79 @@ def test_attempt_allocation_retry_and_restart_recovery_preserve_history(tmp_path
         RuntimeRepository(tmp_path).save_stage_run(
             replace(RuntimeRepository(tmp_path).get_stage_run("stage_run_1"), next_attempt=1)
         )
+
+
+def test_attempt_allocation_recovers_a_crash_without_reusing_the_number(
+    tmp_path, monkeypatch
+) -> None:
+    """Catch a Task/Stage write gap that permits the same attempt number twice."""
+    repository = RuntimeRepository(tmp_path)
+    repository.create_project(_project(), (_stage(),))
+    original_write = repository._write_json
+    failed = False
+
+    def fail_first_stage_write(path, value):
+        nonlocal failed
+        if path.parent.name == "stages" and not failed:
+            failed = True
+            raise OSError("simulated crash")
+        return original_write(path, value)
+
+    monkeypatch.setattr(repository, "_write_json", fail_first_stage_write)
+    with pytest.raises(OSError, match="simulated crash"):
+        LocalTaskManager(repository).queue(
+            "stage_run_1",
+            operation=TaskOperation.EXECUTE,
+            executor_id="test.analyze",
+            input_bindings={},
+        )
+
+    reopened = RuntimeRepository(tmp_path)
+    second = LocalTaskManager(reopened).queue(
+        "stage_run_1",
+        operation=TaskOperation.EXECUTE,
+        executor_id="test.analyze",
+        input_bindings={},
+    )
+    history = reopened.list_task_attempts("stage_run_1")
+
+    assert [task.attempt for task in history] == [1, 2]
+    assert second.attempt == 2
+
+
+def test_second_attempt_is_blocked_while_an_attempt_is_active(tmp_path) -> None:
+    """Catch overlapping local attempts that make activity and pointer writes race."""
+    repository = RuntimeRepository(tmp_path)
+    repository.create_project(_project(), (_stage(),))
+    tasks = LocalTaskManager(repository)
+    first = tasks.queue(
+        "stage_run_1",
+        operation=TaskOperation.EXECUTE,
+        executor_id="test.analyze",
+        input_bindings={},
+    )
+    tasks.start(first.task_id)
+
+    with pytest.raises(RuntimeConflictError, match="active TaskAttempt"):
+        tasks.queue(
+            "stage_run_1",
+            operation=TaskOperation.EXECUTE,
+            executor_id="test.analyze",
+            input_bindings={},
+        )
+
+
+def test_project_save_rejects_a_stale_snapshot(tmp_path) -> None:
+    """Catch one Project pointer update silently discarding another."""
+    repository = RuntimeRepository(tmp_path)
+    repository.create_project(_project(), (_stage(),))
+    original = repository.get_project("proj_1")
+    current = replace(original, display_name="current")
+    saved = repository.save_project(
+        current, expected_updated_at=original.updated_at
+    )
+    assert saved.updated_at != original.updated_at
+    stale = replace(original, display_name="stale", updated_at=now_utc())
+
+    with pytest.raises(RuntimeConflictError, match="changed since it was read"):
+        repository.save_project(stale, expected_updated_at=original.updated_at)

@@ -10,15 +10,16 @@ import tempfile
 import uuid
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator, Mapping
+from typing import Callable, Iterator, Mapping
 
 from .models import (
     InputBinding,
     ProjectRuntimeV1,
     StageRunV1,
     TaskAttemptV1,
+    TaskError,
     TaskOperation,
     TaskStatus,
 )
@@ -55,10 +56,18 @@ class RuntimeRepository:
         self._projects = self._records / "projects"
         self._stages = self._records / "stages"
         self._tasks = self._records / "tasks"
+        self._allocations = self._records / "allocations"
         self._locks = self._records / "locks"
-        for directory in (self._projects, self._stages, self._tasks, self._locks):
+        for directory in (
+            self._projects,
+            self._stages,
+            self._tasks,
+            self._allocations,
+            self._locks,
+        ):
             directory.mkdir(parents=True, exist_ok=True)
         self._global_lock = self._locks / "repository.lock"
+        self._recover_allocations()
 
     def create_project(
         self, project: ProjectRuntimeV1, stage_runs: tuple[StageRunV1, ...]
@@ -89,19 +98,45 @@ class RuntimeRepository:
             raise RuntimeNotFoundError(f"Project not found: {project_id}")
         return ProjectRuntimeV1.from_dict(self._read_json(path))
 
-    def save_project(self, project: ProjectRuntimeV1) -> ProjectRuntimeV1:
+    def save_project(
+        self, project: ProjectRuntimeV1, *, expected_updated_at: str
+    ) -> ProjectRuntimeV1:
         with self._lock(self._project_lock_path(project.project_id)):
             existing = self.get_project(project.project_id)
-            if (
-                project.workflow != existing.workflow
-                or project.created_at != existing.created_at
-                or project.stage_runs != existing.stage_runs
-            ):
-                raise RuntimeConflictError(
-                    "Project workflow, creation time, and StageRun identity are immutable"
-                )
+            if existing.updated_at != expected_updated_at:
+                raise RuntimeConflictError("Project changed since it was read")
+            self._validate_project_update(existing, project)
+            project = replace(project, updated_at=existing.updated_at)
+            if project == existing:
+                return existing
+            project = replace(
+                project, updated_at=self._next_update_token(existing.updated_at)
+            )
             self._write_json(self._project_path(project.project_id), project.to_dict())
         return project
+
+    def update_project(
+        self,
+        project_id: str,
+        updater: Callable[[ProjectRuntimeV1], ProjectRuntimeV1],
+    ) -> ProjectRuntimeV1:
+        """Apply one read-modify-write while holding the Project lock."""
+        if not callable(updater):
+            raise ValueError("updater must be callable")
+        with self._lock(self._project_lock_path(project_id)):
+            existing = self.get_project(project_id)
+            updated = updater(existing)
+            if not isinstance(updated, ProjectRuntimeV1):
+                raise ValueError("updater must return ProjectRuntimeV1")
+            self._validate_project_update(existing, updated)
+            updated = replace(updated, updated_at=existing.updated_at)
+            if updated == existing:
+                return existing
+            updated = replace(
+                updated, updated_at=self._next_update_token(existing.updated_at)
+            )
+            self._write_json(self._project_path(project_id), updated.to_dict())
+            return updated
 
     def list_projects(self, *, include_deleted: bool = False) -> tuple[ProjectRuntimeV1, ...]:
         projects = [
@@ -152,7 +187,14 @@ class RuntimeRepository:
         if not isinstance(operation, TaskOperation):
             raise ValueError("operation must be a TaskOperation")
         with self._lock(self._stage_lock_path(stage_run_id)):
+            self._recover_allocation_locked(stage_run_id)
             stage = self.get_stage_run(stage_run_id)
+            for task_id in stage.task_ids:
+                status = self.get_task_attempt(task_id).status
+                if status in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
+                    raise RuntimeConflictError(
+                        f"StageRun already has an active TaskAttempt: {task_id}"
+                    )
             timestamp = now_utc()
             task = TaskAttemptV1(
                 task_id=self.new_id("task"),
@@ -166,17 +208,32 @@ class RuntimeRepository:
                 created_at=timestamp,
                 queued_at=timestamp,
             )
-            updated_stage = replace(
+            reserved_stage = replace(
                 stage,
                 next_attempt=stage.next_attempt + 1,
-                task_ids=stage.task_ids + (task.task_id,),
                 updated_at=timestamp,
             )
-            # An orphan Task record is safer than a StageRun pointing to a missing Task.
+            completed_stage = replace(
+                reserved_stage, task_ids=stage.task_ids + (task.task_id,)
+            )
+            journal_path = self._allocation_path(stage_run_id)
+            self._write_json(
+                journal_path,
+                {
+                    "schema_version": "task_allocation.v1",
+                    "task": task.to_dict(),
+                },
+            )
+            # The journal makes every boundary recoverable. Reserve the number
+            # before exposing the Task so a crash can only create a gap, never reuse.
+            self._write_json(
+                self._stage_path(reserved_stage.stage_run_id), reserved_stage.to_dict()
+            )
             self._write_json(self._task_path(task.task_id), task.to_dict())
             self._write_json(
-                self._stage_path(updated_stage.stage_run_id), updated_stage.to_dict()
+                self._stage_path(completed_stage.stage_run_id), completed_stage.to_dict()
             )
+            self._delete_file(journal_path)
             return task
 
     def get_task_attempt(self, task_id: str) -> TaskAttemptV1:
@@ -237,6 +294,100 @@ class RuntimeRepository:
 
     def _task_lock_path(self, task_id: str) -> Path:
         return self._locks / f"task-{self._validate_record_id(task_id)}.lock"
+
+    def _allocation_path(self, stage_run_id: str) -> Path:
+        return self._allocations / f"{self._validate_record_id(stage_run_id)}.json"
+
+    @staticmethod
+    def _validate_project_update(
+        existing: ProjectRuntimeV1, updated: ProjectRuntimeV1
+    ) -> None:
+        if updated.project_id != existing.project_id:
+            raise RuntimeConflictError("Project identity is immutable")
+        if (
+            updated.workflow != existing.workflow
+            or updated.created_at != existing.created_at
+            or updated.stage_runs != existing.stage_runs
+        ):
+            raise RuntimeConflictError(
+                "Project workflow, creation time, and StageRun identity are immutable"
+            )
+
+    @staticmethod
+    def _next_update_token(previous: str) -> str:
+        """Return a repository-owned token that strictly advances from *previous*."""
+        current = datetime.now(timezone.utc)
+        try:
+            prior = datetime.fromisoformat(previous)
+            if prior.tzinfo is None:
+                prior = prior.replace(tzinfo=timezone.utc)
+            prior = prior.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            return current.isoformat()
+        if current <= prior:
+            current = prior + timedelta(microseconds=1)
+        return current.isoformat()
+
+    def _recover_allocations(self) -> None:
+        for path in sorted(self._allocations.glob("*.json")):
+            value = self._read_json(path)
+            task_value = value.get("task")
+            if value.get("schema_version") != "task_allocation.v1" or not isinstance(
+                task_value, Mapping
+            ):
+                raise RuntimeConflictError(f"Invalid Task allocation journal: {path.name}")
+            task = TaskAttemptV1.from_dict(task_value)
+            with self._lock(self._stage_lock_path(task.stage_run_id)):
+                self._recover_allocation_locked(task.stage_run_id)
+
+    def _recover_allocation_locked(self, stage_run_id: str) -> None:
+        path = self._allocation_path(stage_run_id)
+        if not path.is_file():
+            return
+        value = self._read_json(path)
+        task_value = value.get("task")
+        if value.get("schema_version") != "task_allocation.v1" or not isinstance(
+            task_value, Mapping
+        ):
+            raise RuntimeConflictError(f"Invalid Task allocation journal: {path.name}")
+        task = TaskAttemptV1.from_dict(task_value)
+        if task.stage_run_id != stage_run_id:
+            raise RuntimeConflictError("Task allocation journal targets another StageRun")
+        if task.status is TaskStatus.QUEUED:
+            task = replace(
+                task,
+                status=TaskStatus.INTERRUPTED,
+                finished_at=now_utc(),
+                error=TaskError(
+                    code="allocation_interrupted",
+                    message="local process stopped during TaskAttempt allocation",
+                    retryable=True,
+                ),
+            )
+        stage = self.get_stage_run(stage_run_id)
+        reserved = replace(
+            stage,
+            next_attempt=max(stage.next_attempt, task.attempt + 1),
+            updated_at=max(stage.updated_at, task.created_at),
+        )
+        self._write_json(self._stage_path(stage_run_id), reserved.to_dict())
+        self._write_json(self._task_path(task.task_id), task.to_dict())
+        if task.task_id not in reserved.task_ids:
+            reserved = replace(
+                reserved,
+                task_ids=reserved.task_ids + (task.task_id,),
+                updated_at=max(reserved.updated_at, task.created_at),
+            )
+            self._write_json(self._stage_path(stage_run_id), reserved.to_dict())
+        self._delete_file(path)
+
+    @staticmethod
+    def _delete_file(path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        RuntimeRepository._fsync_directory(path.parent)
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, object]:

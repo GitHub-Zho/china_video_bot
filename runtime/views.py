@@ -15,7 +15,7 @@ from .models import (
     TaskStatus,
 )
 from .repository import RuntimeRepository
-from .services import WorkflowCatalog, artifact_ids
+from .services import WorkflowCatalog, artifact_ids, validate_stage_output_snapshot
 
 
 class StageStateResolver:
@@ -40,10 +40,10 @@ class StageStateResolver:
         tasks = self.repository.list_task_attempts(stage_run.stage_run_id)
         latest = tasks[-1] if tasks else None
 
-        if latest is not None and latest.status is TaskStatus.QUEUED:
-            activity = StageActivity.QUEUED
-        elif latest is not None and latest.status is TaskStatus.RUNNING:
+        if any(task.status is TaskStatus.RUNNING for task in tasks):
             activity = StageActivity.RUNNING
+        elif any(task.status is TaskStatus.QUEUED for task in tasks):
+            activity = StageActivity.QUEUED
         else:
             activity = StageActivity.IDLE
 
@@ -90,6 +90,19 @@ class StageStateResolver:
             memo[stage_id] = StageFreshness.NO_OUTPUT
             return memo[stage_id]
 
+        try:
+            normalized_outputs = validate_stage_output_snapshot(
+                stage, outputs, self.artifacts
+            )
+        except (RuntimeError, LookupError, ValueError):
+            memo[stage_id] = StageFreshness.STALE
+            return memo[stage_id]
+        active_ids = tuple(
+            artifact_id
+            for binding in normalized_outputs.values()
+            for artifact_id in artifact_ids(binding)
+        )
+
         if any(
             self._freshness(project, workflow, dependency, memo)
             is not StageFreshness.FRESH
@@ -122,11 +135,14 @@ class StageStateResolver:
         memo[stage_id] = StageFreshness.FRESH
         return memo[stage_id]
 
-    @staticmethod
-    def _review(project, stage, stage_run) -> StageReview:
+    def _review(self, project, stage, stage_run) -> StageReview:
         if not stage.approval_required:
             return StageReview.NOT_REQUIRED
         active = dict(project.artifact_bindings.stage_outputs.get(stage.stage_id, {}))
+        try:
+            active = validate_stage_output_snapshot(stage, active, self.artifacts)
+        except (RuntimeError, LookupError, ValueError):
+            return StageReview.NEEDS_REVIEW
         if stage_run.approval is not None and dict(
             stage_run.approval.approved_outputs
         ) == active:
@@ -174,4 +190,3 @@ class StageStateResolver:
             if stage.stage_id == stage_id:
                 return stage
         raise BindingResolutionError(f"unknown Stage: {stage_id}")
-

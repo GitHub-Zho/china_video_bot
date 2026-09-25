@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import Iterable, Mapping
 
 from artifacts import ArtifactRepository
-from workflow import WorkflowDefinition
+from workflow import Cardinality, WorkflowDefinition
 
 from .models import (
     ApprovalSnapshot,
@@ -142,31 +142,40 @@ class ProjectService:
     resume_project = open_project
 
     def archive_project(self, project_id: str) -> ProjectRuntimeV1:
-        project = self.repository.get_project(project_id)
-        if project.deleted_at is not None:
-            raise RuntimeConflictError("deleted Project cannot be archived")
-        return self.repository.save_project(
-            replace(
+        def archive(project: ProjectRuntimeV1) -> ProjectRuntimeV1:
+            if project.deleted_at is not None:
+                raise RuntimeConflictError("deleted Project cannot be archived")
+            return replace(
                 project,
                 lifecycle_status=ProjectLifecycleStatus.ARCHIVED,
                 updated_at=now_utc(),
             )
-        )
+
+        return self.repository.update_project(project_id, archive)
 
     def delete_project(self, project_id: str) -> ProjectRuntimeV1:
-        project = self.repository.get_project(project_id)
-        if project.deleted_at is not None:
-            return project
-        return self.repository.save_project(
-            replace(project, deleted_at=now_utc(), updated_at=now_utc())
-        )
+        def delete(project: ProjectRuntimeV1) -> ProjectRuntimeV1:
+            if project.deleted_at is not None:
+                return project
+            timestamp = now_utc()
+            return replace(project, deleted_at=timestamp, updated_at=timestamp)
+
+        return self.repository.update_project(project_id, delete)
 
     def restore_project(self, project_id: str) -> ProjectRuntimeV1:
         project = self.repository.get_project(project_id)
         self.workflow_for(project)
-        restored = replace(project, deleted_at=None, updated_at=now_utc())
-        self._validate_project_artifacts(restored)
-        return self.repository.save_project(restored)
+        self._validate_project_artifacts(project)
+
+        def restore(current: ProjectRuntimeV1) -> ProjectRuntimeV1:
+            return replace(
+                current,
+                lifecycle_status=ProjectLifecycleStatus.ACTIVE,
+                deleted_at=None,
+                updated_at=now_utc(),
+            )
+
+        return self.repository.update_project(project_id, restore)
 
     def set_active(
         self,
@@ -176,7 +185,6 @@ class ProjectService:
         binding: object,
     ) -> ProjectRuntimeV1:
         project = self.repository.get_project(project_id)
-        self._ensure_mutable(project)
         workflow = self.workflow_for(project)
         stage = self._stage(workflow, stage_id)
         try:
@@ -187,20 +195,55 @@ class ProjectService:
         normalized = slot.validate_binding(normalized_input)
         self._validate_artifact_binding(normalized, slot.artifact_type)
 
-        stage_outputs = {
-            key: dict(outputs)
-            for key, outputs in project.artifact_bindings.stage_outputs.items()
-        }
-        stage_outputs.setdefault(stage_id, {})[output_slot] = normalized
-        updated = replace(
-            project,
-            artifact_bindings=ProjectArtifactBindings(
-                project_inputs=project.artifact_bindings.project_inputs,
-                stage_outputs=stage_outputs,
-            ),
-            updated_at=now_utc(),
-        )
-        return self.repository.save_project(updated)
+        def select(current: ProjectRuntimeV1) -> ProjectRuntimeV1:
+            self._ensure_mutable(current)
+            stage_outputs = {
+                key: dict(outputs)
+                for key, outputs in current.artifact_bindings.stage_outputs.items()
+            }
+            stage_outputs.setdefault(stage_id, {})[output_slot] = normalized
+            return replace(
+                current,
+                artifact_bindings=ProjectArtifactBindings(
+                    project_inputs=current.artifact_bindings.project_inputs,
+                    stage_outputs=stage_outputs,
+                ),
+                updated_at=now_utc(),
+            )
+
+        return self.repository.update_project(project_id, select)
+
+    def set_initial_active_outputs(
+        self,
+        project_id: str,
+        stage_id: str,
+        outputs: Mapping[str, ArtifactBinding],
+    ) -> ProjectRuntimeV1:
+        """Fill empty Active slots from one successful attempt in one Project write."""
+        project = self.repository.get_project(project_id)
+        stage = self._stage(self.workflow_for(project), stage_id)
+        normalized = validate_stage_output_snapshot(stage, outputs, self.artifacts)
+
+        def initialize(current: ProjectRuntimeV1) -> ProjectRuntimeV1:
+            self._ensure_mutable(current)
+            stage_outputs = {
+                key: dict(values)
+                for key, values in current.artifact_bindings.stage_outputs.items()
+            }
+            selected = stage_outputs.setdefault(stage_id, {})
+            for slot_name, binding in normalized.items():
+                if not artifact_ids(selected.get(slot_name)) and artifact_ids(binding):
+                    selected[slot_name] = binding
+            return replace(
+                current,
+                artifact_bindings=ProjectArtifactBindings(
+                    project_inputs=current.artifact_bindings.project_inputs,
+                    stage_outputs=stage_outputs,
+                ),
+                updated_at=now_utc(),
+            )
+
+        return self.repository.update_project(project_id, initialize)
 
     def set_project_input(
         self, project_id: str, input_key: str, binding: object
@@ -209,31 +252,37 @@ class ProjectService:
         self._ensure_mutable(project)
         normalized = normalize_artifact_binding(binding, f"project input {input_key}")
         self._validate_artifact_binding(normalized)
-        project_inputs = dict(project.artifact_bindings.project_inputs)
-        project_inputs[input_key] = normalized
-        return self.repository.save_project(
-            replace(
-                project,
+
+        def select(current: ProjectRuntimeV1) -> ProjectRuntimeV1:
+            self._ensure_mutable(current)
+            project_inputs = dict(current.artifact_bindings.project_inputs)
+            project_inputs[input_key] = normalized
+            return replace(
+                current,
                 artifact_bindings=ProjectArtifactBindings(
                     project_inputs=project_inputs,
-                    stage_outputs=project.artifact_bindings.stage_outputs,
+                    stage_outputs=current.artifact_bindings.stage_outputs,
                 ),
                 updated_at=now_utc(),
             )
-        )
+
+        return self.repository.update_project(project_id, select)
 
     def approve_stage(self, project_id: str, stage_id: str) -> StageRunV1:
         project = self.repository.get_project(project_id)
         self._ensure_mutable(project)
-        self._stage(self.workflow_for(project), stage_id)
+        stage = self._stage(self.workflow_for(project), stage_id)
         outputs = project.artifact_bindings.stage_outputs.get(stage_id, {})
-        if not any(artifact_ids(binding) for binding in outputs.values()):
+        approved_outputs = validate_stage_output_snapshot(
+            stage, outputs, self.artifacts
+        )
+        if not any(artifact_ids(binding) for binding in approved_outputs.values()):
             raise RuntimeConflictError("Stage has no Active output to approve")
         stage_run = self.repository.get_stage_run(project.stage_runs[stage_id])
         return self.repository.save_stage_run(
             replace(
                 stage_run,
-                approval=ApprovalSnapshot(dict(outputs), now_utc()),
+                approval=ApprovalSnapshot(approved_outputs, now_utc()),
                 updated_at=now_utc(),
             )
         )
@@ -292,6 +341,48 @@ class ProjectService:
                 )
 
 
+def validate_stage_output_snapshot(
+    stage,
+    outputs: Mapping[str, ArtifactBinding],
+    artifacts: ArtifactRepository,
+) -> dict[str, ArtifactBinding]:
+    """Validate one complete Active/Approved output snapshot for a Stage."""
+    unknown = set(outputs) - set(stage.outputs)
+    if unknown:
+        raise RuntimeConflictError(
+            f"unknown output slots: {', '.join(sorted(unknown))}"
+        )
+    normalized: dict[str, ArtifactBinding] = {}
+    for slot_name, slot in stage.outputs.items():
+        if slot_name not in outputs:
+            if slot.cardinality is Cardinality.ONE:
+                raise RuntimeConflictError(f"required output is missing: {slot_name}")
+            value: object = None if slot.cardinality is Cardinality.OPTIONAL else []
+        else:
+            value = outputs[slot_name]
+            if isinstance(value, tuple):
+                value = list(value)
+        try:
+            binding = slot.validate_binding(value)
+        except ValueError as error:
+            raise RuntimeConflictError(
+                f"invalid output binding {slot_name}: {error}"
+            ) from error
+        for artifact_id in artifact_ids(binding):
+            revision = artifacts.get_revision(artifact_id)
+            if revision.deleted_at is not None or revision.purged_at is not None:
+                raise RuntimeConflictError(
+                    f"output {slot_name} references a non-live Artifact"
+                )
+            if revision.artifact_type != slot.artifact_type:
+                raise RuntimeConflictError(
+                    f"output {slot_name} expects {slot.artifact_type}, got "
+                    f"{revision.artifact_type}"
+                )
+        normalized[slot_name] = binding
+    return normalized
+
+
 class RuntimeArtifactReferenceChecker:
     """Callable injected into ArtifactRepository to protect retained Runtime refs."""
 
@@ -322,4 +413,3 @@ class RuntimeArtifactReferenceChecker:
                 ):
                     return True
         return False
-

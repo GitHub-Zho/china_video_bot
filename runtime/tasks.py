@@ -137,4 +137,3 @@ class LocalTaskManager:
             raise RuntimeConflictError(
                 f"cannot {action} TaskAttempt in {task.status.value}; expected {expected}"
             )
-
