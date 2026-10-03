@@ -8,6 +8,7 @@ from .models import (
     TranscriptV1,
     VideoUnderstandingV1,
 )
+from .review import UnderstandingDraft, effective_global_summary, effective_segments
 
 __all__ = [
     "AIBaseline",
@@ -16,4 +17,7 @@ __all__ = [
     "TranscriptSpan",
     "TranscriptV1",
     "VideoUnderstandingV1",
+    "UnderstandingDraft",
+    "effective_global_summary",
+    "effective_segments",
 ]
