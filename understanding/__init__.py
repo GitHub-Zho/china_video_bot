@@ -28,6 +28,7 @@ from .workflow import (
     register_understanding_workflow,
 )
 from .capabilities import FasterWhisperSourceTranscriber, probe_media_duration
+from .service import UnderstandingService
 
 __all__ = [
     "AIBaseline",
@@ -55,4 +56,5 @@ __all__ = [
     "register_understanding_workflow",
     "FasterWhisperSourceTranscriber",
     "probe_media_duration",
+    "UnderstandingService",
 ]

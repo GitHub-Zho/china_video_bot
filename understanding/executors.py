@@ -202,12 +202,17 @@ def make_transcript_grounded_analysis_executor(
             "general video understanding",
         )
         payload = adapt_legacy_understanding(legacy, transcript_payload)
+        active_binding = context.project.artifact_bindings.stage_outputs.get(
+            "analyze_source", {}
+        ).get("understanding")
+        base_artifact_id = active_binding if isinstance(active_binding, str) else None
         return ArtifactOutputSpec(
             owner=ArtifactOwner.asset(source_ref.id),
             payload_schema_version=VideoUnderstandingV1.SCHEMA_VERSION,
             content=payload.to_json_bytes(),
             media_type="application/json",
             display_name="Video Understanding",
+            base_artifact_id=base_artifact_id,
             metadata={
                 "change_kind": "fresh_analysis",
                 "analysis_profile": analysis_profile,
@@ -241,4 +246,3 @@ def register_understanding_executors(
             artifacts=artifacts,
         ),
     )
-
